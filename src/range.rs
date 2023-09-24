@@ -3,7 +3,9 @@ use std::ops::{RangeBounds, RangeInclusive};
 /// Maps single-dimension value to chunks in a certain range.
 pub struct SingleDimMapping {
     range: RangeInclusive<u64>,
+    /// Elements per chunk.
     spacing: u64,
+    /// Max count of chunks.
     chunks_len: usize,
 }
 
