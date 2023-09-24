@@ -34,35 +34,28 @@ impl SingleDimMapping {
     }
 
     /// Gets the chunk position of a value in this mapping.
-    pub fn chunk_of<T>(&self, value: T) -> Result<usize, SingleDimMappingError>
-    where
-        T: Into<u64>,
-    {
-        let mut raw = value.into();
-        self.in_range(raw)?;
-        raw -= *self.range.start();
-        let pos = (raw / self.spacing) as usize;
+    pub fn chunk_of(&self, mut value: u64) -> Result<usize, SingleDimMappingError> {
+        self.in_range(value)?;
+        value -= *self.range.start();
+        let pos = (value / self.spacing) as usize;
         assert!(pos < self.chunks_len);
         Ok(pos)
     }
 
     /// Gets range of chunks from given range bounds in this mapping.
-    pub fn chunks_of<T>(
+    pub fn chunks_of(
         &self,
-        range: impl RangeBounds<T>,
-    ) -> Result<RangeInclusive<usize>, SingleDimMappingError>
-    where
-        T: Into<u64> + Copy,
-    {
+        range: impl RangeBounds<u64>,
+    ) -> Result<RangeInclusive<usize>, SingleDimMappingError> {
         let start = match range.start_bound() {
-            std::ops::Bound::Included(value) => self.chunk_of(Into::<u64>::into(*value))?,
-            std::ops::Bound::Excluded(value) => self.chunk_of(Into::<u64>::into(*value) + 1)?,
+            std::ops::Bound::Included(value) => self.chunk_of(*value)?,
+            std::ops::Bound::Excluded(value) => self.chunk_of(*value + 1)?,
             std::ops::Bound::Unbounded => 0,
         };
 
         let end = match range.end_bound() {
-            std::ops::Bound::Included(value) => self.chunk_of(Into::<u64>::into(*value))?,
-            std::ops::Bound::Excluded(value) => self.chunk_of(Into::<u64>::into(*value) - 1)?,
+            std::ops::Bound::Included(value) => self.chunk_of(*value)?,
+            std::ops::Bound::Excluded(value) => self.chunk_of(*value - 1)?,
             std::ops::Bound::Unbounded => self.chunks_len - 1,
         };
 
