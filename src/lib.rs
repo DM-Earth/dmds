@@ -1,14 +1,14 @@
 mod range;
 pub mod world;
 
-/// Represents types stored directly in a dimentional world.
+/// Represents types stored directly in a dimensional world.
 pub trait Element {
-    /// Count of dimentions.
+    /// Count of dimensions.
     const DIMS: usize;
 
-    /// Gets the value of given dimention.
+    /// Gets the value of given dimension.
     ///
-    /// Dimention index starts from 0, which should be
+    /// dimension index starts from 0, which should be
     /// a unique data such as the only id.
     fn value_of(&self, dim: usize) -> u64;
 }

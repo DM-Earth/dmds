@@ -31,7 +31,7 @@ impl<T: Element, const DIMS: usize> World<T, DIMS> {
         assert_eq!(
             T::DIMS,
             DIMS,
-            "dimentions count of type and generic parameter should be equaled"
+            "dimensions count of type and generic parameter should be equaled"
         );
 
         Self {
@@ -63,7 +63,7 @@ struct PosBox<const DIMS: usize> {
 }
 
 impl<const DIMS: usize> PosBox<DIMS> {
-    /// Constructs a box from given ranges of each dimentions.
+    /// Constructs a box from given ranges of each dimensions.
     ///
     /// # Panics
     ///
