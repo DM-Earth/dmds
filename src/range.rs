@@ -15,7 +15,8 @@ impl SingleDimMapping {
     /// # Panics
     ///
     /// Panics if the given `range` is not divisible by `elements_per_chunk`.
-    pub fn new(range: RangeInclusive<u64>, elements_per_chunk: usize) -> Self {
+    pub fn new(range_bounds: impl RangeBounds<u64>, elements_per_chunk: usize) -> Self {
+        let range = Wrapper(range_bounds).into();
         let diff = *range.end() - *range.start() + 1;
         let spacing = elements_per_chunk as u64;
 
@@ -47,19 +48,15 @@ impl SingleDimMapping {
         &self,
         range: impl RangeBounds<u64>,
     ) -> Result<RangeInclusive<usize>, SingleDimMappingError> {
-        let start = match range.start_bound() {
+        Ok(match range.start_bound() {
             std::ops::Bound::Included(value) => self.chunk_of(*value)?,
             std::ops::Bound::Excluded(value) => self.chunk_of(*value + 1)?,
             std::ops::Bound::Unbounded => 0,
-        };
-
-        let end = match range.end_bound() {
+        }..=match range.end_bound() {
             std::ops::Bound::Included(value) => self.chunk_of(*value)?,
             std::ops::Bound::Excluded(value) => self.chunk_of(*value - 1)?,
             std::ops::Bound::Unbounded => self.chunks_len - 1,
-        };
-
-        Ok(start..=end)
+        })
     }
 
     #[inline(always)]
@@ -111,5 +108,28 @@ mod single_dim_map_tests {
         assert_eq!(map.chunks_of(2_u64..=7_u64).unwrap(), 0..=2);
         assert_eq!(map.chunks_of(..7_u64).unwrap(), 0..=1);
         assert_eq!(map.chunks_of(5_u64..).unwrap(), 1..=2);
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Wrapper<T>(pub T);
+
+impl<T> Into<RangeInclusive<u64>> for Wrapper<T>
+where
+    T: RangeBounds<u64>,
+{
+    #[inline(always)]
+    fn into(self) -> RangeInclusive<u64> {
+        match self.0.start_bound() {
+            std::ops::Bound::Included(value) => *value,
+            std::ops::Bound::Excluded(value) => value + 1,
+            std::ops::Bound::Unbounded => 0,
+        }
+        ..=match self.0.start_bound() {
+            std::ops::Bound::Included(value) => *value,
+            std::ops::Bound::Excluded(value) => value - 1,
+            std::ops::Bound::Unbounded => u64::MAX,
+        }
     }
 }
