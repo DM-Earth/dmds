@@ -1,4 +1,7 @@
-use std::{ops::RangeInclusive, path::PathBuf};
+use std::{
+    ops::{Add, RangeInclusive},
+    path::PathBuf,
+};
 
 use async_lock::RwLock;
 use dashmap::{mapref, DashMap};
@@ -55,6 +58,7 @@ pub struct RefMut<'a, T: Element, const DIMS: usize> {
     lock_g: async_lock::RwLockWriteGuard<'a, T>,
 }
 
+/// Represents a box in dimensional space.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PosBox<const DIMS: usize> {
     /// The most negative point of the box.
@@ -87,6 +91,7 @@ impl<const DIMS: usize> PosBox<DIMS> {
     }
 
     /// Whether this box contains another box in space.
+    #[inline]
     fn contains(&self, rhs: &Self) -> bool {
         self.start
             .iter()
@@ -100,13 +105,14 @@ impl<const DIMS: usize> PosBox<DIMS> {
     }
 
     /// Returns the intersection of this and another box.
-    fn intersect(&self, target: &Self) -> Option<Self> {
+    #[inline]
+    fn intersect(self, rhs: Self) -> Option<Self> {
         const TEMP_RANGE: RangeInclusive<usize> = 0..=0;
         let mut ranges = [TEMP_RANGE; DIMS];
 
         for (index, value) in self.start.iter().enumerate() {
-            let range = std::cmp::max(*value, target.start[index])
-                ..=std::cmp::min(self.end[index], target.end[index]);
+            let range = std::cmp::max(*value, rhs.start[index])
+                ..=std::cmp::min(self.end[index], rhs.end[index]);
             if range.end() <= range.start() {
                 return None;
             }
@@ -117,14 +123,29 @@ impl<const DIMS: usize> PosBox<DIMS> {
     }
 }
 
+impl<const DIMS: usize> Add for PosBox<DIMS> {
+    type Output = RawShapeSlice<DIMS>;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self::Output {
+        if self.contains(&rhs) {
+            RawShapeSlice::Single(self)
+        } else if rhs.contains(&self) {
+            RawShapeSlice::Single(rhs)
+        } else {
+            RawShapeSlice::Multiple(vec![self, rhs])
+        }
+    }
+}
+
 enum RawShapeSlice<const DIMS: usize> {
     None,
     Single(PosBox<DIMS>),
-    Multi(Vec<PosBox<DIMS>>),
+    Multiple(Vec<PosBox<DIMS>>),
 }
 
 impl<const DIMS: usize> RawShapeSlice<DIMS> {
-    fn intersect(&mut self, target: &PosBox<DIMS>) {
+    fn intersect(&mut self, target: PosBox<DIMS>) {
         match self {
             RawShapeSlice::Single(value) => {
                 if let Some(result) = value.intersect(target) {
@@ -133,7 +154,9 @@ impl<const DIMS: usize> RawShapeSlice<DIMS> {
                     *self = Self::None
                 }
             }
-            RawShapeSlice::Multi(values) => {}
+            RawShapeSlice::Multiple(values) => {
+                //TODO: 1
+            }
             _ => (),
         }
     }
