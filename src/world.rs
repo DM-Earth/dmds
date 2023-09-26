@@ -55,6 +55,7 @@ pub struct RefMut<'a, T: Element, const DIMS: usize> {
     lock_g: async_lock::RwLockWriteGuard<'a, T>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct PosBox<const DIMS: usize> {
     /// The most negative point of the box.
     start: Pos<DIMS>,
@@ -67,22 +68,73 @@ impl<const DIMS: usize> PosBox<DIMS> {
     ///
     /// # Panics
     ///
-    /// Panics if any range's start > end.
-    #[inline]
-    fn from_ranges(ranges: [RangeInclusive<usize>; DIMS]) -> Self {
+    /// Panics if any range's start > end. (DEBUG)
+    fn new(ranges: [RangeInclusive<usize>; DIMS]) -> Self {
+        let mut start_range = [0; DIMS];
+        for i in ranges.iter().enumerate() {
+            let value = i.1;
+            debug_assert!(
+                value.start() <= value.end(),
+                "start should le than end of range {value:?}"
+            );
+            start_range[i.0] = *value.start()
+        }
+
         Self {
-            start: ranges.map(|value| {
-                debug_assert!(
-                    value.start() <= value.end(),
-                    "start should le than end of range {value:?}"
-                );
-                *value.start()
-            }),
+            start: start_range,
             end: ranges.map(|value| *value.end()),
         }
     }
+
+    /// Whether this box contains another box in space.
+    fn contains(&self, rhs: &Self) -> bool {
+        self.start
+            .iter()
+            .enumerate()
+            .all(|(index, value)| rhs.start[index] >= *value)
+            && self
+                .end
+                .iter()
+                .enumerate()
+                .all(|(index, value)| rhs.end[index] <= *value)
+    }
+
+    /// Returns the intersection of this and another box.
+    fn intersect(&self, target: &Self) -> Option<Self> {
+        const TEMP_RANGE: RangeInclusive<usize> = 0..=0;
+        let mut ranges = [TEMP_RANGE; DIMS];
+
+        for (index, value) in self.start.iter().enumerate() {
+            let range = std::cmp::max(*value, target.start[index])
+                ..=std::cmp::min(self.end[index], target.end[index]);
+            if range.end() <= range.start() {
+                return None;
+            }
+            ranges[index] = range;
+        }
+
+        Some(Self::new(ranges))
+    }
 }
 
-struct RawShapeSlice<const DIMS: usize> {
-    boxes: Vec<PosBox<DIMS>>,
+enum RawShapeSlice<const DIMS: usize> {
+    None,
+    Single(PosBox<DIMS>),
+    Multi(Vec<PosBox<DIMS>>),
+}
+
+impl<const DIMS: usize> RawShapeSlice<DIMS> {
+    fn intersect(&mut self, target: &PosBox<DIMS>) {
+        match self {
+            RawShapeSlice::Single(value) => {
+                if let Some(result) = value.intersect(target) {
+                    *value = result
+                } else {
+                    *self = Self::None
+                }
+            }
+            RawShapeSlice::Multi(values) => {}
+            _ => (),
+        }
+    }
 }

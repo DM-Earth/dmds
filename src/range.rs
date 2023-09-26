@@ -16,7 +16,7 @@ impl SingleDimMapping {
     ///
     /// Panics if the given `range` is not divisible by `elements_per_chunk`.
     pub fn new(range_bounds: impl RangeBounds<u64>, elements_per_chunk: usize) -> Self {
-        let range = Wrapper(range_bounds).into();
+        let range: RangeInclusive<u64> = Wrapper(range_bounds).into();
         let diff = *range.end() - *range.start() + 1;
         let spacing = elements_per_chunk as u64;
 
@@ -121,15 +121,14 @@ where
 {
     #[inline(always)]
     fn into(self) -> RangeInclusive<u64> {
-        match self.0.start_bound() {
+        (match self.0.start_bound() {
             std::ops::Bound::Included(value) => *value,
             std::ops::Bound::Excluded(value) => value + 1,
             std::ops::Bound::Unbounded => 0,
-        }
-        ..=match self.0.start_bound() {
+        })..=(match self.0.start_bound() {
             std::ops::Bound::Included(value) => *value,
             std::ops::Bound::Excluded(value) => value - 1,
             std::ops::Bound::Unbounded => u64::MAX,
-        }
+        })
     }
 }
