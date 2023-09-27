@@ -1,5 +1,6 @@
 use std::{
-    ops::{Add, RangeInclusive},
+    iter::Sum,
+    ops::{Add, AddAssign, RangeBounds, RangeInclusive},
     path::PathBuf,
 };
 
@@ -20,14 +21,14 @@ pub struct World<T, const DIMS: usize> {
     mappings: [SingleDimMapping; DIMS],
 }
 
-pub struct DimPartDescriptor<R> {
+pub struct DimDescriptor<R> {
     pub range: R,
     pub elements_per_chunk: usize,
 }
 
 impl<T: Element, const DIMS: usize> World<T, DIMS> {
     #[inline]
-    pub fn new<R>(root: PathBuf, dim_parts: [DimPartDescriptor<R>; DIMS]) -> Self
+    pub fn new<R>(root: PathBuf, dims: [DimDescriptor<R>; DIMS]) -> Self
     where
         R: std::ops::RangeBounds<u64>,
     {
@@ -40,7 +41,7 @@ impl<T: Element, const DIMS: usize> World<T, DIMS> {
         Self {
             cache: DashMap::new(),
             path: root,
-            mappings: dim_parts
+            mappings: dims
                 .map(|value| SingleDimMapping::new(value.range, value.elements_per_chunk)),
         }
     }
@@ -58,8 +59,15 @@ pub struct RefMut<'a, T: Element, const DIMS: usize> {
     lock_g: async_lock::RwLockWriteGuard<'a, T>,
 }
 
+pub struct Select<'a, T: Element, const DIMS: usize> {
+    world: &'a World<T, DIMS>,
+    slice: RawShape<DIMS>,
+}
+
+impl<T: Element, const DIMS: usize> Select<'_, T, DIMS> {}
+
 /// Represents a box in dimensional space.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct PosBox<const DIMS: usize> {
     /// The most negative point of the box.
     start: Pos<DIMS>,
@@ -124,40 +132,167 @@ impl<const DIMS: usize> PosBox<DIMS> {
 }
 
 impl<const DIMS: usize> Add for PosBox<DIMS> {
-    type Output = RawShapeSlice<DIMS>;
+    type Output = RawShape<DIMS>;
 
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
         if self.contains(&rhs) {
-            RawShapeSlice::Single(self)
+            RawShape::Single(self)
         } else if rhs.contains(&self) {
-            RawShapeSlice::Single(rhs)
+            RawShape::Single(rhs)
         } else {
-            RawShapeSlice::Multiple(vec![self, rhs])
+            RawShape::Multiple(vec![self, rhs])
         }
     }
 }
 
-enum RawShapeSlice<const DIMS: usize> {
+#[cfg(test)]
+mod box_tests {
+    use crate::world::RawShape;
+
+    use super::PosBox;
+
+    #[test]
+    fn creation() {
+        let b = PosBox::new([2..=5, 10..=24]);
+
+        assert_eq!(b.start, [2, 10]);
+        assert_eq!(b.end, [5, 24]);
+    }
+
+    #[test]
+    fn contain() {
+        let b = PosBox {
+            start: [2, 10],
+            end: [5, 24],
+        };
+
+        assert!(b.contains(&PosBox {
+            start: [3, 10],
+            end: [3, 8],
+        }))
+    }
+
+    #[test]
+    fn intersect() {
+        let b0 = PosBox::new([0..=10, 1..=11]);
+        let b1 = PosBox::new([7..=17, 2..=5]);
+        assert_eq!(b0.intersect(b1), Some(PosBox::new([7..=10, 2..=5])));
+
+        let b2 = PosBox::new([7..=17, 11..=12]);
+        assert!(b0.intersect(b2).is_none());
+    }
+
+    #[test]
+    fn add() {
+        let b0 = PosBox::new([0..=10, 1..=11]);
+        let b1 = PosBox::new([1..=10, 3..=4]);
+        assert_eq!(b0 + b1, RawShape::Single(b0));
+
+        let b2 = PosBox::new([7..=17, 2..=5]);
+        assert_eq!(b0 + b2, RawShape::Multiple(vec![b0, b2]));
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum RawShape<const DIMS: usize> {
     None,
     Single(PosBox<DIMS>),
     Multiple(Vec<PosBox<DIMS>>),
 }
 
-impl<const DIMS: usize> RawShapeSlice<DIMS> {
+impl<const DIMS: usize> RawShape<DIMS> {
     fn intersect(&mut self, target: PosBox<DIMS>) {
         match self {
-            RawShapeSlice::Single(value) => {
+            RawShape::Single(value) => {
                 if let Some(result) = value.intersect(target) {
                     *value = result
                 } else {
                     *self = Self::None
                 }
             }
-            RawShapeSlice::Multiple(values) => {
-                //TODO: 1
+            RawShape::Multiple(values) => {
+                *self = values
+                    .iter()
+                    .filter_map(|value| value.intersect(target))
+                    .sum()
             }
             _ => (),
         }
+    }
+}
+
+mod rss_imp {
+    use super::RawShape;
+
+    #[inline(always)]
+    pub(super) fn add<const DIMS: usize>(
+        s: &RawShape<DIMS>,
+        rhs: &RawShape<DIMS>,
+    ) -> RawShape<DIMS> {
+        match (s, rhs) {
+            (RawShape::Single(v0), RawShape::Single(v1)) => *v0 + *v1,
+            (RawShape::Single(v0), RawShape::Multiple(v1))
+            | (RawShape::Multiple(v1), RawShape::Single(v0)) => {
+                let mut vv1 = v1.clone();
+                if !vv1.contains(v0) {
+                    vv1.push(*v0);
+                }
+                RawShape::Multiple(vv1)
+            }
+            (RawShape::Multiple(v0), RawShape::Multiple(v1)) => {
+                let mut vv1 = v1.iter().filter(|v| !v0.contains(v)).copied().collect();
+                let mut vv0 = v0.clone();
+                vv0.append(&mut vv1);
+                RawShape::Multiple(vv0)
+            }
+            (this, RawShape::None) | (RawShape::None, this) => this.clone(),
+        }
+    }
+}
+
+impl<const DIMS: usize> Add for RawShape<DIMS> {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (RawShape::Single(v0), RawShape::Single(v1)) => v0 + v1,
+            (RawShape::Single(v0), RawShape::Multiple(mut v1))
+            | (RawShape::Multiple(mut v1), RawShape::Single(v0)) => {
+                if !v1.contains(&v0) {
+                    v1.push(v0);
+                }
+                RawShape::Multiple(v1)
+            }
+            (RawShape::Multiple(mut v0), RawShape::Multiple(mut v1)) => {
+                v1 = v1.into_iter().filter(|v| !v0.contains(v)).collect();
+                v0.append(&mut v1);
+                RawShape::Multiple(v0)
+            }
+            (this, RawShape::None) | (RawShape::None, this) => this,
+        }
+    }
+}
+
+impl<const DIMS: usize> AddAssign for RawShape<DIMS> {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = rss_imp::add(self, &rhs)
+    }
+}
+
+impl<const DIMS: usize> Sum<PosBox<DIMS>> for RawShape<DIMS> {
+    #[inline]
+    fn sum<I: Iterator<Item = PosBox<DIMS>>>(iter: I) -> Self {
+        iter.map(|v| Self::Single(v)).sum()
+    }
+}
+
+impl<const DIMS: usize> Sum for RawShape<DIMS> {
+    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
+        let mut this = Some(iter.next().unwrap_or(Self::None));
+        while let Some(value) = iter.next() {
+            this = Some(this.take().unwrap() + value)
+        }
+        this.unwrap()
     }
 }

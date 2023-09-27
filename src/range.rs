@@ -125,7 +125,7 @@ where
             std::ops::Bound::Included(value) => *value,
             std::ops::Bound::Excluded(value) => value + 1,
             std::ops::Bound::Unbounded => 0,
-        })..=(match self.0.start_bound() {
+        })..=(match self.0.end_bound() {
             std::ops::Bound::Included(value) => *value,
             std::ops::Bound::Excluded(value) => value - 1,
             std::ops::Bound::Unbounded => u64::MAX,
