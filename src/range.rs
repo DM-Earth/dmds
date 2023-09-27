@@ -115,17 +115,17 @@ mod single_dim_map_tests {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Wrapper<T>(pub T);
 
-impl<T> Into<RangeInclusive<u64>> for Wrapper<T>
+impl<T> From<Wrapper<T>> for RangeInclusive<u64>
 where
     T: RangeBounds<u64>,
 {
     #[inline(always)]
-    fn into(self) -> RangeInclusive<u64> {
-        (match self.0.start_bound() {
+    fn from(val: Wrapper<T>) -> Self {
+        (match val.0.start_bound() {
             std::ops::Bound::Included(value) => *value,
             std::ops::Bound::Excluded(value) => value + 1,
             std::ops::Bound::Unbounded => 0,
-        })..=(match self.0.end_bound() {
+        })..=(match val.0.end_bound() {
             std::ops::Bound::Included(value) => *value,
             std::ops::Bound::Excluded(value) => value - 1,
             std::ops::Bound::Unbounded => u64::MAX,
