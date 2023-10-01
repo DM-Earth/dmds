@@ -64,4 +64,8 @@ pub struct Select<'a, T: Element, const DIMS: usize> {
     slice: RawShape<DIMS>,
 }
 
-impl<T: Element, const DIMS: usize> Select<'_, T, DIMS> {}
+impl<T: Element, const DIMS: usize> Select<'_, T, DIMS> {
+    #[inline]
+    pub fn new<R>() -> Self
+    
+}
