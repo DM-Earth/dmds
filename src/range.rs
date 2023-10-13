@@ -39,7 +39,7 @@ impl SingleDimMapping {
         self.in_range(value)?;
         value -= *self.range.start();
         let pos = (value / self.spacing) as usize;
-        assert!(pos < self.chunks_len);
+        debug_assert!(pos < self.chunks_len);
         Ok(pos)
     }
 
@@ -69,6 +69,11 @@ impl SingleDimMapping {
                 value,
             })
         }
+    }
+
+    #[inline]
+    pub fn chunk_range(&self) -> RangeInclusive<usize> {
+        0..=self.chunks_len - 1
     }
 }
 
