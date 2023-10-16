@@ -19,7 +19,7 @@ use self::select::{PosBox, RawShape};
 
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 
-pub struct World<T, const DIMS: usize, Io: IoHandle> {
+pub struct World<T: Element, const DIMS: usize, Io: IoHandle> {
     cache: DashMap<Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
     path: PathBuf,
     mappings: [SingleDimMapping; DIMS],
