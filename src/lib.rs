@@ -1,11 +1,11 @@
 mod range;
 pub mod world;
 
-use async_trait_fn::{async_trait, unboxed};
+use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
 /// Represents types stored directly in a dimensional world.
-pub trait Element: Sized {
+pub trait Element: Sized + Send + Sync {
     /// Count of dimensions.
     const DIMS: usize;
 
@@ -26,13 +26,10 @@ pub trait Element: Sized {
 }
 
 #[async_trait]
-pub trait IoHandle {
-    type Read: AsyncRead;
-    type Write: AsyncWrite;
+pub trait IoHandle: Send + Sync {
+    type Read: AsyncRead + Unpin + Send + Sync;
+    type Write: AsyncWrite + Unpin + Send + Sync;
 
-    #[unboxed]
     async fn read_chunk(&self, pos: &[usize]) -> futures_lite::io::Result<Self::Read>;
-
-    #[unboxed]
     async fn write_chunk(&self, pos: &[usize]) -> futures_lite::io::Result<Self::Write>;
 }
