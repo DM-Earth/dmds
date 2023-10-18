@@ -2,7 +2,7 @@ pub mod iter;
 mod select;
 
 use std::{
-    ops::{RangeBounds, RangeInclusive},
+    ops::{Deref, DerefMut, RangeBounds, RangeInclusive},
     path::PathBuf,
 };
 
@@ -129,10 +129,35 @@ pub struct Ref<'a, T: Data, const DIMS: usize> {
     lock_g: async_lock::RwLockReadGuard<'a, T>,
 }
 
+impl<T: Data, const DIMS: usize> Deref for Ref<'_, T, DIMS> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &*self.lock_g
+    }
+}
+
 pub struct RefMut<'a, T: Data, const DIMS: usize> {
-    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
+    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<(u64, RwLock<T>)>>>,
     vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
     lock_g: async_lock::RwLockWriteGuard<'a, T>,
+}
+
+impl<T: Data, const DIMS: usize> Deref for RefMut<'_, T, DIMS> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &*self.lock_g
+    }
+}
+
+impl<T: Data, const DIMS: usize> DerefMut for RefMut<'_, T, DIMS> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.lock_g
+    }
 }
 
 pub struct Select<'a, T: Data, const DIMS: usize, Io: IoHandle> {

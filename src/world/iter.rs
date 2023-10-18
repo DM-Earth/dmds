@@ -14,8 +14,8 @@ use crate::{Data, IoHandle};
 
 use super::{select::Shape, World};
 
-enum ReadType {
-    Mem,
+enum ReadType<const DIMS: usize> {
+    Mem([usize; DIMS]),
     Io(usize),
 }
 
@@ -25,15 +25,23 @@ pub enum Error {
     Io(futures_lite::io::Error),
     #[error("requiring value has been taken")]
     ValueTaken,
+    #[error("requiring value not found")]
+    ValueNotFound,
 }
 
 /// A type polls value lazily and immutably.
 pub struct Lazy<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     dims: [u64; DIMS],
-    read_type: ReadType,
-    value: OnceLock<Option<T>>,
+    read_type: ReadType<DIMS>,
+    value: OnceLock<Value<'a, T, DIMS>>,
     read: std::sync::Mutex<Option<Pin<&'a mut Io::Read>>>,
+}
+
+enum Value<'a, T: Data, const DIMS: usize> {
+    Ref(super::Ref<'a, T, DIMS>),
+    Direct(T),
+    None,
 }
 
 impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
@@ -45,11 +53,22 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
 
     pub async fn value(&self) -> Result<&T, Error> {
         if let Some(value) = self.value.get() {
-            return value.as_ref().ok_or(Error::ValueTaken);
+            match value {
+                Value::Ref(val) => todo!(),
+                Value::Direct(_) => todo!(),
+                Value::None => todo!(),
+            }
         }
 
         match self.read_type {
-            ReadType::Mem => todo!(),
+            ReadType::Mem(chunk) => {
+                let val = self
+                    .world
+                    .get(&chunk, self.dims[0])
+                    .await
+                    .ok_or(Error::ValueNotFound)?;
+                todo!()
+            }
             ReadType::Io(len) => {
                 self.value.set(Some(
                     FromBytes {
