@@ -117,23 +117,23 @@ impl<const DIMS: usize> PosBox<DIMS> {
 }
 
 impl<const DIMS: usize> Add for PosBox<DIMS> {
-    type Output = RawShape<DIMS>;
+    type Output = Shape<DIMS>;
 
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
         if self.contains(&rhs) {
-            RawShape::Single(self)
+            Shape::Single(self)
         } else if rhs.contains(&self) {
-            RawShape::Single(rhs)
+            Shape::Single(rhs)
         } else {
-            RawShape::Multiple(vec![self, rhs])
+            Shape::Multiple(vec![self, rhs])
         }
     }
 }
 
 #[cfg(test)]
 mod box_tests {
-    use super::{PosBox, RawShape};
+    use super::{PosBox, Shape};
 
     #[test]
     fn creation() {
@@ -170,10 +170,10 @@ mod box_tests {
     fn add() {
         let b0 = PosBox::new([0..=10, 1..=11]);
         let b1 = PosBox::new([1..=10, 3..=4]);
-        assert_eq!(b0 + b1, RawShape::Single(b0));
+        assert_eq!(b0 + b1, Shape::Single(b0));
 
         let b2 = PosBox::new([7..=17, 2..=5]);
-        assert_eq!(b0 + b2, RawShape::Multiple(vec![b0, b2]));
+        assert_eq!(b0 + b2, Shape::Multiple(vec![b0, b2]));
     }
 
     #[test]
@@ -189,32 +189,32 @@ mod box_tests {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum RawShape<const DIMS: usize> {
+pub enum Shape<const DIMS: usize> {
     None,
     Single(PosBox<DIMS>),
     Multiple(Vec<PosBox<DIMS>>),
 }
 
 pub struct RawShapeIter<'a, const DIMS: usize> {
-    shape: &'a RawShape<DIMS>,
+    shape: &'a Shape<DIMS>,
     current: Option<(usize, PosBoxIter<'a, DIMS>)>,
     done: Vec<Pos<DIMS>>,
 }
 
 impl<const DIMS: usize> RawShapeIter<'_, DIMS> {
     fn fetch_next_usable_iter<'a>(
-        shape: &'a RawShape<DIMS>,
+        shape: &'a Shape<DIMS>,
         iter: &mut PosBoxIter<'a, DIMS>,
         index: &mut usize,
     ) -> Option<Pos<DIMS>> {
         if *index + 1
-            < if let RawShape::Multiple(vec) = shape {
+            < if let Shape::Multiple(vec) = shape {
                 vec.len()
             } else {
                 1
             }
         {
-            let mut iter_next = if let RawShape::Multiple(vec) = shape {
+            let mut iter_next = if let Shape::Multiple(vec) = shape {
                 vec.get(*index + 1).unwrap().iter()
             } else {
                 unreachable!()
@@ -267,17 +267,17 @@ impl<const DIMS: usize> Iterator for RawShapeIter<'_, DIMS> {
     }
 }
 
-impl<const DIMS: usize> RawShape<DIMS> {
+impl<const DIMS: usize> Shape<DIMS> {
     pub fn intersect(&mut self, target: PosBox<DIMS>) {
         match self {
-            RawShape::Single(value) => {
+            Shape::Single(value) => {
                 if let Some(result) = value.intersect(target) {
                     *value = result
                 } else {
                     *self = Self::None
                 }
             }
-            RawShape::Multiple(values) => {
+            Shape::Multiple(values) => {
                 *self = values
                     .iter()
                     .filter_map(|value| value.intersect(target))
@@ -291,9 +291,9 @@ impl<const DIMS: usize> RawShape<DIMS> {
         RawShapeIter {
             shape: self,
             current: match self {
-                RawShape::None => None,
-                RawShape::Single(value) => Some((0, value.iter())),
-                RawShape::Multiple(values) => values.first().map(|e| (0, e.iter())),
+                Shape::None => None,
+                Shape::Single(value) => Some((0, value.iter())),
+                Shape::Multiple(values) => values.first().map(|e| (0, e.iter())),
             },
             done: vec![],
         }
@@ -301,71 +301,65 @@ impl<const DIMS: usize> RawShape<DIMS> {
 }
 
 mod rss_imp {
-    use super::RawShape;
+    use super::Shape;
 
-    #[inline(always)]
-    pub(super) fn add<const DIMS: usize>(
-        s: &RawShape<DIMS>,
-        rhs: &RawShape<DIMS>,
-    ) -> RawShape<DIMS> {
+    pub(super) fn add<const DIMS: usize>(s: &Shape<DIMS>, rhs: &Shape<DIMS>) -> Shape<DIMS> {
         match (s, rhs) {
-            (RawShape::Single(v0), RawShape::Single(v1)) => *v0 + *v1,
-            (RawShape::Single(v0), RawShape::Multiple(v1))
-            | (RawShape::Multiple(v1), RawShape::Single(v0)) => {
+            (Shape::Single(v0), Shape::Single(v1)) => *v0 + *v1,
+            (Shape::Single(v0), Shape::Multiple(v1)) | (Shape::Multiple(v1), Shape::Single(v0)) => {
                 let mut vv1 = v1.clone();
                 if !vv1.contains(v0) {
                     vv1.push(*v0);
                 }
-                RawShape::Multiple(vv1)
+                Shape::Multiple(vv1)
             }
-            (RawShape::Multiple(v0), RawShape::Multiple(v1)) => {
+            (Shape::Multiple(v0), Shape::Multiple(v1)) => {
                 let mut vv1 = v1.iter().filter(|v| !v0.contains(v)).copied().collect();
                 let mut vv0 = v0.clone();
                 vv0.append(&mut vv1);
-                RawShape::Multiple(vv0)
+                Shape::Multiple(vv0)
             }
-            (this, RawShape::None) | (RawShape::None, this) => this.clone(),
+            (this, Shape::None) | (Shape::None, this) => this.clone(),
         }
     }
 }
 
-impl<const DIMS: usize> Add for RawShape<DIMS> {
+impl<const DIMS: usize> Add for Shape<DIMS> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
-            (RawShape::Single(v0), RawShape::Single(v1)) => v0 + v1,
-            (RawShape::Single(v0), RawShape::Multiple(mut v1))
-            | (RawShape::Multiple(mut v1), RawShape::Single(v0)) => {
+            (Shape::Single(v0), Shape::Single(v1)) => v0 + v1,
+            (Shape::Single(v0), Shape::Multiple(mut v1))
+            | (Shape::Multiple(mut v1), Shape::Single(v0)) => {
                 if !v1.contains(&v0) {
                     v1.push(v0);
                 }
-                RawShape::Multiple(v1)
+                Shape::Multiple(v1)
             }
-            (RawShape::Multiple(mut v0), RawShape::Multiple(mut v1)) => {
+            (Shape::Multiple(mut v0), Shape::Multiple(mut v1)) => {
                 v1.retain(|v| !v0.contains(v));
                 v0.append(&mut v1);
-                RawShape::Multiple(v0)
+                Shape::Multiple(v0)
             }
-            (this, RawShape::None) | (RawShape::None, this) => this,
+            (this, Shape::None) | (Shape::None, this) => this,
         }
     }
 }
 
-impl<const DIMS: usize> AddAssign for RawShape<DIMS> {
+impl<const DIMS: usize> AddAssign for Shape<DIMS> {
     fn add_assign(&mut self, rhs: Self) {
         *self = rss_imp::add(self, &rhs)
     }
 }
 
-impl<const DIMS: usize> Sum<PosBox<DIMS>> for RawShape<DIMS> {
-    #[inline]
+impl<const DIMS: usize> Sum<PosBox<DIMS>> for Shape<DIMS> {
     fn sum<I: Iterator<Item = PosBox<DIMS>>>(iter: I) -> Self {
         iter.map(Self::Single).sum()
     }
 }
 
-impl<const DIMS: usize> Sum for RawShape<DIMS> {
+impl<const DIMS: usize> Sum for Shape<DIMS> {
     fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
         let mut this = Some(iter.next().unwrap_or(Self::None));
         for value in iter {
@@ -377,12 +371,12 @@ impl<const DIMS: usize> Sum for RawShape<DIMS> {
 
 #[cfg(test)]
 mod raw_shape_tests {
-    use super::{PosBox, RawShape};
+    use super::{PosBox, Shape};
 
     #[test]
     fn iter() {
         let all_possible_values = [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]];
-        let shape = RawShape::Multiple(vec![
+        let shape = Shape::Multiple(vec![
             PosBox::new([0..=1, 0..=1]),
             PosBox::new([1..=1, 1..=3]),
         ]);

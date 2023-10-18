@@ -4,7 +4,7 @@ use futures_lite::Stream;
 
 use crate::{Element, IoHandle};
 
-use super::{select::RawShape, World};
+use super::{select::Shape, World};
 
 type Future<'a, T> =
     dyn std::future::Future<Output = Option<futures_lite::io::Result<T>>> + Send + 'a;

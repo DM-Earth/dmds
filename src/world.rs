@@ -11,7 +11,7 @@ use dashmap::{mapref, DashMap};
 
 use crate::{range::SingleDimMapping, Element, IoHandle};
 
-use self::select::{PosBox, RawShape};
+use self::select::{PosBox, Shape};
 
 // As for now, array lengths don't support generic parameters,
 // so it's necessary to declare another constant param.
@@ -64,7 +64,7 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 } else {
                     return Select {
                         world: self,
-                        slice: RawShape::None,
+                        slice: Shape::None,
                     };
                 }
             } else {
@@ -74,7 +74,7 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         Select {
             world: self,
-            slice: RawShape::Single(PosBox::new(arr)),
+            slice: Shape::Single(PosBox::new(arr)),
         }
     }
 
@@ -94,7 +94,7 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 } else {
                     return Select {
                         world: self,
-                        slice: RawShape::None,
+                        slice: Shape::None,
                     };
                 }
             } else {
@@ -104,7 +104,7 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         Select {
             world: self,
-            slice: RawShape::Single(PosBox::new(arr)),
+            slice: Shape::Single(PosBox::new(arr)),
         }
     }
 }
@@ -123,7 +123,7 @@ pub struct RefMut<'a, T: Element, const DIMS: usize> {
 
 pub struct Select<'a, T: Element, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
-    slice: RawShape<DIMS>,
+    slice: Shape<DIMS>,
 }
 
 impl<T: Element, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
@@ -131,7 +131,7 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// and intersect with current selection.
     #[inline]
     pub fn range_and(&mut self, dim: usize, range: impl RangeBounds<u64> + Clone) {
-        if let RawShape::Single(v) = self.world.range_select(dim, range).slice {
+        if let Shape::Single(v) = self.world.range_select(dim, range).slice {
             self.slice.intersect(v)
         }
     }
@@ -140,7 +140,7 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// and intersect with current selection.
     #[inline]
     pub fn and(&mut self, dim: usize, value: u64) {
-        if let RawShape::Single(v) = self.world.select(dim, value).slice {
+        if let Shape::Single(v) = self.world.select(dim, value).slice {
             self.slice.intersect(v)
         }
     }
