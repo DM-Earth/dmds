@@ -6,40 +6,104 @@ use std::{
     task::Poll,
 };
 
-use futures_lite::{stream::CountFuture, Stream};
+use bytes::BufMut;
+use futures_lite::{ready, stream::CountFuture, AsyncRead, Stream};
 use pin_project_lite::pin_project;
 
 use crate::{Data, IoHandle};
 
 use super::{select::Shape, World};
 
-struct Lazy<'a, T: Data, const DIMS: usize, Io: IoHandle> {
-    world: &'a World<T, DIMS, Io>,
+enum ReadType {
+    Mem,
+    Io(usize),
 }
 
-struct FromBytesFuture<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("io err: {0}")]
+    Io(futures_lite::io::Error),
+    #[error("requiring value has been taken")]
+    ValueTaken,
+}
+
+/// A type polls value lazily and immutably.
+pub struct Lazy<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+    world: &'a World<T, DIMS, Io>,
+    dims: [u64; DIMS],
+    read_type: ReadType,
+    value: OnceLock<Option<T>>,
+    read: std::sync::Mutex<Option<Pin<&'a mut Io::Read>>>,
+}
+
+impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
+    /// Gets info of dimensions of the value.
+    #[inline]
+    pub fn dims(&self) -> &[u64; DIMS] {
+        &self.dims
+    }
+
+    pub async fn value(&self) -> Result<&T, Error> {
+        if let Some(value) = self.value.get() {
+            return value.as_ref().ok_or(Error::ValueTaken);
+        }
+
+        match self.read_type {
+            ReadType::Mem => todo!(),
+            ReadType::Io(len) => {
+                self.value.set(Some(
+                    FromBytes {
+                        world: self.world,
+                        read: self.read.lock().unwrap().take().unwrap(),
+                        dims: &self.dims,
+                        len,
+                        buf: None,
+                    }
+                    .await
+                    .map_err(Error::Io)?,
+                ));
+
+                Ok(self.value.get().unwrap().as_ref().unwrap())
+            }
+        }
+    }
+}
+
+struct FromBytes<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     read: Pin<&'a mut Io::Read>,
-
-    buf: FromBytesBuf,
+    dims: &'a [u64; DIMS],
+    len: usize,
+    buf: Option<bytes::BytesMut>,
 }
 
-enum FromBytesBuf {
-    Read(Vec<u8>),
-    Pening(usize),
-    Done,
-}
-
-impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytesFuture<'_, T, DIMS, Io> {
+impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS, Io> {
     type Output = futures_lite::io::Result<T>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
 
-        match this.buf {
-            FromBytesBuf::Read(ref mut slice) => T::decode(, , ),
-            FromBytesBuf::Pening(_) => todo!(),
-            FromBytesBuf::Done => todo!(),
+        if let Some(ref mut buf) = this.buf {
+            match ready!(this.read.poll_read(cx, buf)) {
+                Ok(act_len) => {
+                    if act_len != self.len {
+                        return Poll::Ready(Err(futures_lite::io::Error::new(
+                            futures_lite::io::ErrorKind::UnexpectedEof,
+                            format!("read length {act_len} bytes, expected {} bytes", self.len),
+                        )));
+                    }
+                }
+                Err(err) => return Poll::Ready(Err(err)),
+            }
+
+            let Some(buf) = this.buf.take();
+            let mut buf = buf.freeze();
+            Poll::Ready(T::decode(this.dims, buf))
+        } else {
+            let mut buf = bytes::BytesMut::with_capacity(this.len);
+            buf.put_bytes(0, this.len);
+            this.buf = Some(buf);
+            Pin::new(this).poll(cx)
         }
     }
 }
@@ -57,10 +121,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkIter<'_, T, DIMS,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        match this {
-            ChunkIter::Pre(future) => if let Poll::Ready(value) = future.poll(cx) {},
-            ChunkIter::InProcess(_, _) => todo!(),
-        }
+        todo!()
     }
 }
 

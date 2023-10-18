@@ -16,13 +16,13 @@ pub trait Data: Sized + Send + Sync {
     fn value_of(&self, dim: usize) -> u64;
 
     /// Decode this type from given `Read` and dimensional values.
-    fn decode<R: std::io::Read>(&self, dims: &[u64], read: &mut R) -> std::io::Result<Self>;
+    fn decode<B: bytes::Buf>(dims: &[u64], buf: B) -> std::io::Result<Self>;
 
-    /// Encode this type into bytes with `Write`.
+    /// Encode this type into bytes buffer.
     ///
     /// Note: You don't need to encode dimensional values.
     /// They will be encoded automatically.
-    fn encode<W: std::io::Write>(&self, dims: &[u64], write: &mut W) -> std::io::Result<()>;
+    fn encode<B: bytes::BufMut>(&self, dims: &[u64], buf: B) -> std::io::Result<()>;
 }
 
 #[async_trait]

@@ -107,6 +107,12 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             slice: Shape::Single(PosBox::new(arr)),
         }
     }
+
+    async fn get<'a>(&'a self, chunk: &Pos<DIMS>, id: u64) -> Option<Ref<'a, T, DIMS>> {
+        let map_g = self.cache.get(chunk)?;
+
+        todo!()
+    }
 }
 
 pub struct Ref<'a, T: Data, const DIMS: usize> {
