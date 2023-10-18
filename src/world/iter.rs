@@ -51,26 +51,34 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
         &self.dims
     }
 
+    /// Gets the value inside this initializer or initialize it
+    /// if uninitialized.
     pub async fn value(&self) -> Result<&T, Error> {
         if let Some(value) = self.value.get() {
-            match value {
-                Value::Ref(val) => todo!(),
-                Value::Direct(_) => todo!(),
-                Value::None => todo!(),
-            }
+            return match value {
+                Value::Ref(val) => Ok(&*val),
+                Value::Direct(val) => Ok(val),
+                Value::None => Err(Error::ValueTaken),
+            };
         }
 
         match self.read_type {
             ReadType::Mem(chunk) => {
-                let val = self
-                    .world
-                    .get(&chunk, self.dims[0])
-                    .await
-                    .ok_or(Error::ValueNotFound)?;
-                todo!()
+                self.value.set(Value::Ref(
+                    self.world
+                        .get(&chunk, self.dims[0])
+                        .await
+                        .ok_or(Error::ValueNotFound)?,
+                ));
+
+                Ok(if let Some(Value::Ref(val)) = self.value.get() {
+                    &*val
+                } else {
+                    unreachable!()
+                })
             }
             ReadType::Io(len) => {
-                self.value.set(Some(
+                self.value.set(Value::Direct(
                     FromBytes {
                         world: self.world,
                         read: self.read.lock().unwrap().take().unwrap(),
@@ -82,14 +90,18 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
                     .map_err(Error::Io)?,
                 ));
 
-                Ok(self.value.get().unwrap().as_ref().unwrap())
+                Ok(if let Some(Value::Direct(val)) = self.value.get() {
+                    val
+                } else {
+                    unreachable!()
+                })
             }
         }
     }
 }
 
 struct FromBytes<'a, T: Data, const DIMS: usize, Io: IoHandle> {
-    world: &'a World<T, DIMS, Io>,
+    _world: &'a World<T, DIMS, Io>,
     read: Pin<&'a mut Io::Read>,
     dims: &'a [u64; DIMS],
     len: usize,
@@ -103,9 +115,9 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS,
         let this = &mut *self;
 
         if let Some(ref mut buf) = this.buf {
-            match ready!(this.read.poll_read(cx, buf)) {
+            match ready!(this.read.as_mut().poll_read(cx, buf)) {
                 Ok(act_len) => {
-                    if act_len != self.len {
+                    if act_len != this.len {
                         return Poll::Ready(Err(futures_lite::io::Error::new(
                             futures_lite::io::ErrorKind::UnexpectedEof,
                             format!("read length {act_len} bytes, expected {} bytes", self.len),
@@ -115,8 +127,10 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS,
                 Err(err) => return Poll::Ready(Err(err)),
             }
 
-            let Some(buf) = this.buf.take();
-            let mut buf = buf.freeze();
+            let Some(buf) = this.buf.take() else {
+                unreachable!()
+            };
+            let buf = buf.freeze();
             Poll::Ready(T::decode(this.dims, buf))
         } else {
             let mut buf = bytes::BytesMut::with_capacity(this.len);
@@ -150,33 +164,13 @@ pub struct Iter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
 }
 
 impl<T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'_, T, DIMS, Io> {
-    type Item = futures_lite::io::Result<T>;
+    type Item = ();
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
-
-        if let Some(ref mut future) = this.future {
-            match future.as_mut().poll(cx) {
-                std::task::Poll::Ready(Some(value)) => std::task::Poll::Ready(Some(value)),
-                std::task::Poll::Ready(None) => {
-                    if let Some(next) = this.shape_iter.next() {
-                        let world = this.world;
-                        *future = Box::pin(async move {
-                            let read = world.io_handle.read_chunk(&next).await;
-                            todo!()
-                        });
-                        std::pin::Pin::new(this).poll_next(cx)
-                    } else {
-                        std::task::Poll::Ready(None)
-                    }
-                }
-                std::task::Poll::Pending => todo!(),
-            }
-        } else {
-            todo!()
-        }
+        todo!()
     }
 }
