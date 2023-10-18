@@ -20,7 +20,7 @@ use self::select::{PosBox, Shape};
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 
 pub struct World<T: Data, const DIMS: usize, Io: IoHandle> {
-    cache: DashMap<Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
+    cache: DashMap<Pos<DIMS>, RwLock<Vec<(u64, RwLock<T>)>>>,
     path: PathBuf,
     mappings: [SingleDimMapping; DIMS],
     io_handle: Io,
@@ -108,22 +108,30 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         }
     }
 
-    async fn get<'a>(&'a self, chunk: &Pos<DIMS>, id: u64) -> Option<Ref<'a, T, DIMS>> {
-        let map_g = self.cache.get(chunk)?;
+    pub async fn get<'a>(&'a self, chunk: &Pos<DIMS>, id: u64) -> Option<Ref<'a, T, DIMS>> {
+        let map_g: mapref::one::Ref<'a, _, _> = self.cache.get(chunk)?;
+        let vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>> =
+            unsafe { std::mem::transmute(map_g.value().read().await) };
+        let lock_g: async_lock::RwLockReadGuard<'a, T> =
+            unsafe { std::mem::transmute(vec_g.iter().find(|val| val.0 == id)?.1.read().await) };
 
-        todo!()
+        Some(Ref {
+            map_g,
+            vec_g,
+            lock_g,
+        })
     }
 }
 
 pub struct Ref<'a, T: Data, const DIMS: usize> {
-    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
-    vec_g: async_lock::RwLockReadGuard<'a, Vec<RwLock<T>>>,
+    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<(u64, RwLock<T>)>>>,
+    vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
     lock_g: async_lock::RwLockReadGuard<'a, T>,
 }
 
 pub struct RefMut<'a, T: Data, const DIMS: usize> {
     map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
-    vec_g: async_lock::RwLockReadGuard<'a, Vec<RwLock<T>>>,
+    vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
     lock_g: async_lock::RwLockWriteGuard<'a, T>,
 }
 
