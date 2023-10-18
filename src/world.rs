@@ -9,7 +9,7 @@ use std::{
 use async_lock::RwLock;
 use dashmap::{mapref, DashMap};
 
-use crate::{range::SingleDimMapping, Element, IoHandle};
+use crate::{range::SingleDimMapping, Data, IoHandle};
 
 use self::select::{PosBox, Shape};
 
@@ -19,7 +19,7 @@ use self::select::{PosBox, Shape};
 
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 
-pub struct World<T: Element, const DIMS: usize, Io: IoHandle> {
+pub struct World<T: Data, const DIMS: usize, Io: IoHandle> {
     cache: DashMap<Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
     path: PathBuf,
     mappings: [SingleDimMapping; DIMS],
@@ -31,7 +31,7 @@ pub struct DimDescriptor<R> {
     pub elements_per_chunk: usize,
 }
 
-impl<T: Element, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
+impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     #[inline]
     pub fn new<R>(root: PathBuf, dims: [DimDescriptor<R>; DIMS], io_handle: Io) -> Self
     where
@@ -109,24 +109,24 @@ impl<T: Element, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     }
 }
 
-pub struct Ref<'a, T: Element, const DIMS: usize> {
+pub struct Ref<'a, T: Data, const DIMS: usize> {
     map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
     vec_g: async_lock::RwLockReadGuard<'a, Vec<RwLock<T>>>,
     lock_g: async_lock::RwLockReadGuard<'a, T>,
 }
 
-pub struct RefMut<'a, T: Element, const DIMS: usize> {
+pub struct RefMut<'a, T: Data, const DIMS: usize> {
     map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<RwLock<T>>>>,
     vec_g: async_lock::RwLockReadGuard<'a, Vec<RwLock<T>>>,
     lock_g: async_lock::RwLockWriteGuard<'a, T>,
 }
 
-pub struct Select<'a, T: Element, const DIMS: usize, Io: IoHandle> {
+pub struct Select<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     slice: Shape<DIMS>,
 }
 
-impl<T: Element, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
+impl<T: Data, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// Select a range of chunks in the given dimension,
     /// and intersect with current selection.
     #[inline]

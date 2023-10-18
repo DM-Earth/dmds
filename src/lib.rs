@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
 /// Represents types stored directly in a dimensional world.
-pub trait Element: Sized + Send + Sync {
+pub trait Data: Sized + Send + Sync {
     /// Count of dimensions.
     const DIMS: usize;
 
