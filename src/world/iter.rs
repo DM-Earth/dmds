@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    marker::PhantomData,
     pin::Pin,
     sync::{
         atomic::{self, AtomicUsize},
@@ -10,17 +9,11 @@ use std::{
 };
 
 use bytes::BufMut;
-use futures_lite::{ready, stream::CountFuture, AsyncRead, Stream};
-use pin_project_lite::pin_project;
+use futures_lite::{ready, AsyncRead, Stream};
 
 use crate::{Data, IoHandle};
 
-use super::{select::Shape, World};
-
-enum ReadType<const DIMS: usize> {
-    Mem([usize; DIMS]),
-    Io(usize),
-}
+use super::World;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -41,16 +34,14 @@ pub enum Error {
 pub struct Lazy<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     dims: [u64; DIMS],
+
     read_type: ReadType<DIMS>,
     value: OnceLock<Value<'a, T, DIMS>>,
-    read: std::sync::Mutex<Option<Pin<&'a mut Io::Read>>>,
-
-    state: LazyCheckState,
 }
 
-struct LazyCheckState {
-    current: Weak<AtomicUsize>,
-    expected: usize,
+enum ReadType<const DIMS: usize> {
+    Mem([usize; DIMS]),
+    Io(bytes::Bytes),
 }
 
 enum Value<'a, T: Data, const DIMS: usize> {
@@ -70,7 +61,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
     pub async fn get_or_init(&self) -> Result<&T, Error> {
         if let Some(value) = self.value.get() {
             return match value {
-                Value::Ref(val) => Ok(&*val),
+                Value::Ref(val) => Ok(val),
                 Value::Direct(val) => Ok(val),
             };
         }
@@ -85,37 +76,14 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
                 ));
 
                 Ok(if let Some(Value::Ref(val)) = self.value.get() {
-                    &*val
+                    val
                 } else {
                     unreachable!()
                 })
             }
-            ReadType::Io(len) => {
-                {
-                    let current = self
-                        .state
-                        .current
-                        .upgrade()
-                        .map(|v| v.load(atomic::Ordering::Acquire));
-
-                    if current != Some(self.state.expected) {
-                        return Err(Error::IterUpdated {
-                            expected: self.state.expected,
-                            current,
-                        });
-                    }
-                }
-
+            ReadType::Io(ref bytes) => {
                 let _ = self.value.set(Value::Direct(
-                    FromBytes {
-                        _world: self.world,
-                        read: self.read.lock().unwrap().take().unwrap(),
-                        dims: &self.dims,
-                        len,
-                        buf: None,
-                    }
-                    .await
-                    .map_err(Error::Io)?,
+                    T::decode(&self.dims, bytes.clone()).map_err(Error::Io)?,
                 ));
 
                 Ok(if let Some(Value::Direct(val)) = self.value.get() {
@@ -158,6 +126,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS,
             let Some(buf) = this.buf.take() else {
                 unreachable!()
             };
+
             let buf = buf.freeze();
             Poll::Ready(T::decode(this.dims, buf))
         } else {
@@ -169,20 +138,72 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS,
     }
 }
 
-enum ChunkIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
-    Pre(Pin<Box<dyn std::future::Future<Output = futures_lite::io::Result<Io::Read>> + Send + 'a>>),
-    InProcess(Io::Read, &'a World<T, DIMS, Io>),
+type IoReadFuture<'a, Io: IoHandle> =
+    dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read>> + Send + 'a;
+
+enum ChunkFromBytesIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+    Pre {
+        world: &'a World<T, DIMS, Io>,
+        future: Pin<Box<IoReadFuture<'a, Io>>>,
+    },
+    InProgress {
+        world: &'a World<T, DIMS, Io>,
+        read: Io::Read,
+        progress: InProgress<DIMS>,
+    },
 }
 
-impl<T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkIter<'_, T, DIMS, Io> {
-    type Item = ();
+enum InProgress<const DIMS: usize> {
+    Dims([([u8; 8], bool); DIMS]),
+    Len([u8; 4]),
+    Data(bytes::BytesMut, usize),
+}
+
+enum U64Cache {
+    Buf([u8; 8]),
+    Num(u64),
+}
+
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromBytesIter<'a, T, DIMS, Io> {
+    type Item = std::io::Result<Lazy<'a, T, DIMS, Io>>;
 
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        todo!()
+        match this {
+            ChunkFromBytesIter::InProgress { read, progress, .. } => match progress {
+                InProgress::Dims(_) => todo!(),
+                InProgress::Len(buf) => match ready!(Pin::new(read).poll_read(cx, buf)) {
+                    Ok(4) => {
+                        let len = u32::from_be_bytes(*buf) as usize;
+                        let mut bytes = bytes::BytesMut::with_capacity(len);
+                        bytes.put_bytes(0, len);
+                        *progress = InProgress::Data(bytes, len);
+                        Pin::new(this).poll_next(cx)
+                    }
+                    Ok(len) => Poll::Ready(Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("read {len} bytes of length, expected 4 bytes"),
+                    )))),
+                    Err(err) => Poll::Ready(Some(Err(err))),
+                },
+                InProgress::Data(_, _) => todo!(),
+            },
+            ChunkFromBytesIter::Pre { world, future } => {
+                *this = Self::InProgress {
+                    world: *world,
+                    read: match ready!(future.as_mut().poll(cx)) {
+                        Ok(val) => val,
+                        Err(err) => return std::task::Poll::Ready(Some(Err(err))),
+                    },
+                    progress: InProgress::Dims([([0; 8], false); DIMS]),
+                };
+
+                Pin::new(this).poll_next(cx)
+            }
+        }
     }
 }
 
