@@ -64,7 +64,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
 
         match self.read_type {
             ReadType::Mem(chunk) => {
-                self.value.set(Value::Ref(
+                let _ = self.value.set(Value::Ref(
                     self.world
                         .get(&chunk, self.dims[0])
                         .await
@@ -78,9 +78,9 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
                 })
             }
             ReadType::Io(len) => {
-                self.value.set(Value::Direct(
+                let _ = self.value.set(Value::Direct(
                     FromBytes {
-                        world: self.world,
+                        _world: self.world,
                         read: self.read.lock().unwrap().take().unwrap(),
                         dims: &self.dims,
                         len,
@@ -120,7 +120,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS,
                     if act_len != this.len {
                         return Poll::Ready(Err(futures_lite::io::Error::new(
                             futures_lite::io::ErrorKind::UnexpectedEof,
-                            format!("read length {act_len} bytes, expected {} bytes", self.len),
+                            format!("read {act_len} bytes, expected {} bytes", self.len),
                         )));
                     }
                 }
