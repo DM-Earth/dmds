@@ -2,7 +2,10 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{self, AtomicUsize},
+        Arc, OnceLock, Weak,
+    },
     task::Poll,
 };
 
@@ -27,6 +30,11 @@ pub enum Error {
     ValueTaken,
     #[error("requiring value not found")]
     ValueNotFound,
+    #[error("depending stream updated.")]
+    IterUpdated {
+        expected: usize,
+        current: Option<usize>,
+    },
 }
 
 /// A type polls value lazily and immutably.
@@ -36,12 +44,18 @@ pub struct Lazy<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     read_type: ReadType<DIMS>,
     value: OnceLock<Value<'a, T, DIMS>>,
     read: std::sync::Mutex<Option<Pin<&'a mut Io::Read>>>,
+
+    state: LazyCheckState,
+}
+
+struct LazyCheckState {
+    current: Weak<AtomicUsize>,
+    expected: usize,
 }
 
 enum Value<'a, T: Data, const DIMS: usize> {
     Ref(super::Ref<'a, T, DIMS>),
     Direct(T),
-    None,
 }
 
 impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
@@ -53,12 +67,11 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
 
     /// Gets the value inside this initializer or initialize it
     /// if uninitialized.
-    pub async fn value(&self) -> Result<&T, Error> {
+    pub async fn get_or_init(&self) -> Result<&T, Error> {
         if let Some(value) = self.value.get() {
             return match value {
                 Value::Ref(val) => Ok(&*val),
                 Value::Direct(val) => Ok(val),
-                Value::None => Err(Error::ValueTaken),
             };
         }
 
@@ -78,6 +91,21 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
                 })
             }
             ReadType::Io(len) => {
+                {
+                    let current = self
+                        .state
+                        .current
+                        .upgrade()
+                        .map(|v| v.load(atomic::Ordering::Acquire));
+
+                    if current != Some(self.state.expected) {
+                        return Err(Error::IterUpdated {
+                            expected: self.state.expected,
+                            current,
+                        });
+                    }
+                }
+
                 let _ = self.value.set(Value::Direct(
                     FromBytes {
                         _world: self.world,
