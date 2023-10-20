@@ -19,9 +19,10 @@ use self::select::{PosBox, Shape};
 
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 
+type Chunk<T> = Vec<(u64, RwLock<T>)>;
+
 pub struct World<T: Data, const DIMS: usize, Io: IoHandle> {
-    cache: DashMap<Pos<DIMS>, RwLock<Vec<(u64, RwLock<T>)>>>,
-    path: PathBuf,
+    cache: DashMap<Pos<DIMS>, RwLock<Chunk<T>>>,
     mappings: [SingleDimMapping; DIMS],
     io_handle: Io,
 }
@@ -33,7 +34,7 @@ pub struct DimDescriptor<R> {
 
 impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     #[inline]
-    pub fn new<R>(root: PathBuf, dims: [DimDescriptor<R>; DIMS], io_handle: Io) -> Self
+    pub fn new<R>(dims: [DimDescriptor<R>; DIMS], io_handle: Io) -> Self
     where
         R: std::ops::RangeBounds<u64>,
     {
@@ -45,7 +46,6 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         Self {
             cache: DashMap::new(),
-            path: root,
             mappings: dims
                 .map(|value| SingleDimMapping::new(value.range, value.elements_per_chunk)),
             io_handle,
@@ -124,8 +124,8 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 }
 
 pub struct Ref<'a, T: Data, const DIMS: usize> {
-    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<(u64, RwLock<T>)>>>,
-    vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
+    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>,
+    vec_g: async_lock::RwLockReadGuard<'a, Chunk<T>>,
     lock_g: async_lock::RwLockReadGuard<'a, T>,
 }
 

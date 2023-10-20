@@ -96,48 +96,6 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
     }
 }
 
-struct FromBytes<'a, T: Data, const DIMS: usize, Io: IoHandle> {
-    _world: &'a World<T, DIMS, Io>,
-    read: Pin<&'a mut Io::Read>,
-    dims: &'a [u64; DIMS],
-    len: usize,
-    buf: Option<bytes::BytesMut>,
-}
-
-impl<T: Data, const DIMS: usize, Io: IoHandle> Future for FromBytes<'_, T, DIMS, Io> {
-    type Output = futures_lite::io::Result<T>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-
-        if let Some(ref mut buf) = this.buf {
-            match ready!(this.read.as_mut().poll_read(cx, buf)) {
-                Ok(act_len) => {
-                    if act_len != this.len {
-                        return Poll::Ready(Err(futures_lite::io::Error::new(
-                            futures_lite::io::ErrorKind::UnexpectedEof,
-                            format!("read {act_len} bytes, expected {} bytes", self.len),
-                        )));
-                    }
-                }
-                Err(err) => return Poll::Ready(Err(err)),
-            }
-
-            let Some(buf) = this.buf.take() else {
-                unreachable!()
-            };
-
-            let buf = buf.freeze();
-            Poll::Ready(T::decode(this.dims, buf))
-        } else {
-            let mut buf = bytes::BytesMut::with_capacity(this.len);
-            buf.put_bytes(0, this.len);
-            this.buf = Some(buf);
-            Pin::new(this).poll(cx)
-        }
-    }
-}
-
 type IoReadFuture<'a, Io: IoHandle> =
     dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read>> + Send + 'a;
 
@@ -154,14 +112,22 @@ enum ChunkFromBytesIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
 }
 
 enum InProgress<const DIMS: usize> {
-    Dims([([u8; 8], bool); DIMS]),
-    Len([u8; 4]),
-    Data(bytes::BytesMut, usize),
+    Dims([U64Cache; DIMS]),
+    Len([u8; 4], [u64; DIMS]),
+    Data(bytes::BytesMut, [u64; DIMS]),
 }
 
+#[derive(Clone, Copy)]
 enum U64Cache {
     Buf([u8; 8]),
     Num(u64),
+}
+
+impl Default for U64Cache {
+    #[inline]
+    fn default() -> Self {
+        Self::Buf([0; 8])
+    }
 }
 
 impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromBytesIter<'a, T, DIMS, Io> {
@@ -173,14 +139,47 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromBytesIter
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match this {
-            ChunkFromBytesIter::InProgress { read, progress, .. } => match progress {
-                InProgress::Dims(_) => todo!(),
-                InProgress::Len(buf) => match ready!(Pin::new(read).poll_read(cx, buf)) {
+            ChunkFromBytesIter::InProgress {
+                read,
+                progress,
+                world,
+            } => match progress {
+                InProgress::Dims(dims) => {
+                    for dim in &mut *dims {
+                        if let U64Cache::Buf(buf) = dim {
+                            match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
+                                Ok(8) => (),
+                                Ok(actlen) => {
+                                    return Poll::Ready(Some(Err(std::io::Error::new(
+                                        std::io::ErrorKind::UnexpectedEof,
+                                        format!("read {actlen} bytes of length, expected 8 bytes"),
+                                    ))))
+                                }
+                                Err(err) => return Poll::Ready(Some(Err(err))),
+                            }
+                            *dim = U64Cache::Num(u64::from_be_bytes(*buf));
+                        }
+                    }
+
+                    *progress = InProgress::Len(
+                        [0; 4],
+                        (*dims).map(|e| {
+                            if let U64Cache::Num(num) = e {
+                                num
+                            } else {
+                                unreachable!()
+                            }
+                        }),
+                    );
+
+                    Pin::new(this).poll_next(cx)
+                }
+                InProgress::Len(buf, dims) => match ready!(Pin::new(read).poll_read(cx, buf)) {
                     Ok(4) => {
                         let len = u32::from_be_bytes(*buf) as usize;
                         let mut bytes = bytes::BytesMut::with_capacity(len);
                         bytes.put_bytes(0, len);
-                        *progress = InProgress::Data(bytes, len);
+                        *progress = InProgress::Data(bytes, *dims);
                         Pin::new(this).poll_next(cx)
                     }
                     Ok(len) => Poll::Ready(Some(Err(std::io::Error::new(
@@ -189,7 +188,27 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromBytesIter
                     )))),
                     Err(err) => Poll::Ready(Some(Err(err))),
                 },
-                InProgress::Data(_, _) => todo!(),
+                InProgress::Data(buf, dims) => {
+                    let len = buf.len();
+                    match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
+                        Ok(len_act) => {
+                            if len == len_act {
+                                Poll::Ready(Some(Ok(Lazy {
+                                    world: *world,
+                                    dims: *dims,
+                                    read_type: ReadType::Io(buf.clone().freeze()),
+                                    value: OnceLock::new(),
+                                })))
+                            } else {
+                                Poll::Ready(Some(Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    format!("read {len_act} bytes of length, expected {len} bytes"),
+                                ))))
+                            }
+                        }
+                        Err(err) => Poll::Ready(Some(Err(err))),
+                    }
+                }
             },
             ChunkFromBytesIter::Pre { world, future } => {
                 *this = Self::InProgress {
@@ -198,7 +217,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromBytesIter
                         Ok(val) => val,
                         Err(err) => return std::task::Poll::Ready(Some(Err(err))),
                     },
-                    progress: InProgress::Dims([([0; 8], false); DIMS]),
+                    progress: InProgress::Dims([Default::default(); DIMS]),
                 };
 
                 Pin::new(this).poll_next(cx)
