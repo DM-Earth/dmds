@@ -8,12 +8,13 @@ use std::{
     task::Poll,
 };
 
+use async_lock::{RwLock, RwLockReadGuardArc};
 use bytes::BufMut;
 use futures_lite::{ready, AsyncRead, Stream};
 
 use crate::{Data, IoHandle};
 
-use super::World;
+use super::{Chunk, Pos, World};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -35,18 +36,27 @@ pub struct Lazy<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     dims: [u64; DIMS],
 
-    read_type: ReadType<DIMS>,
+    read_type: ReadType<'a, T, DIMS>,
     value: OnceLock<Value<'a, T, DIMS>>,
 }
 
-enum ReadType<const DIMS: usize> {
-    Mem([usize; DIMS]),
+enum ReadType<'a, T, const DIMS: usize> {
+    Mem {
+        chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+        guard: RwLockReadGuardArc<Chunk<T>>,
+    },
     Io(bytes::Bytes),
 }
 
 enum Value<'a, T: Data, const DIMS: usize> {
-    Ref(super::Ref<'a, T, DIMS>),
+    Ref(RefArc<'a, T, DIMS>),
     Direct(T),
+}
+
+struct RefArc<'a, T, const DIMS: usize> {
+    chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+    guard_vec: RwLockReadGuardArc<Chunk<T>>,
+    guard: RwLockReadGuardArc<T>,
 }
 
 impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
@@ -67,7 +77,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
         }
 
         match self.read_type {
-            ReadType::Mem(chunk) => {
+            ReadType::Mem { chunk, guard } => {
                 let _ = self.value.set(Value::Ref(
                     self.world
                         .get(&chunk, self.dims[0])
@@ -76,7 +86,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
                 ));
 
                 Ok(if let Some(Value::Ref(val)) = self.value.get() {
-                    val
+                    &val.guard
                 } else {
                     unreachable!()
                 })
@@ -96,7 +106,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
     }
 }
 
-type IoReadFuture<'a, Io: IoHandle> =
+type IoReadFuture<'a, Io> =
     dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read>> + Send + 'a;
 
 enum ChunkFromBytesIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
