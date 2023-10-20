@@ -1,10 +1,7 @@
 pub mod iter;
 mod select;
 
-use std::{
-    ops::{Deref, DerefMut, RangeBounds, RangeInclusive},
-    path::PathBuf,
-};
+use std::ops::{Deref, DerefMut, RangeBounds, RangeInclusive};
 
 use async_lock::RwLock;
 use dashmap::{mapref, DashMap};

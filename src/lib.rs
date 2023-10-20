@@ -30,6 +30,13 @@ pub trait IoHandle: Send + Sync {
     type Read: AsyncRead + Unpin + Send + Sync;
     type Write: AsyncWrite + Unpin + Send + Sync;
 
-    async fn read_chunk(&self, pos: &[usize]) -> futures_lite::io::Result<Self::Read>;
-    async fn write_chunk(&self, pos: &[usize]) -> futures_lite::io::Result<Self::Write>;
+    async fn read_chunk<const DIMS: usize>(
+        &self,
+        pos: [usize; DIMS],
+    ) -> std::io::Result<Self::Read>;
+
+    async fn write_chunk<const DIMS: usize>(
+        &self,
+        pos: [usize; DIMS],
+    ) -> std::io::Result<Self::Write>;
 }
