@@ -5,7 +5,7 @@ use std::{
     task::Poll,
 };
 
-use async_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use async_lock::{RwLock, RwLockReadGuard};
 use bytes::BufMut;
 use futures_lite::{ready, AsyncRead, Stream};
 
@@ -33,7 +33,6 @@ pub struct Lazy<'a, T: Data, const DIMS: usize> {
     id: u64,
     // this should always be initialized in Io mode.
     dims: OnceLock<[u64; DIMS]>,
-    chunk: Pos<DIMS>,
 
     read_type: ReadType<'a, T, DIMS>,
     value: OnceLock<Value<'a, T, DIMS>>,
@@ -50,7 +49,6 @@ enum ReadType<'a, T, const DIMS: usize> {
 
 enum Value<'a, T: Data, const DIMS: usize> {
     Ref(RefArc<'a, T, DIMS>),
-    RefMut(RefMutArc<'a, T, DIMS>),
     Direct(T),
 }
 
@@ -58,12 +56,6 @@ struct RefArc<'a, T, const DIMS: usize> {
     _chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
     _guard_vec: Arc<RwLockReadGuard<'a, Chunk<T>>>,
     guard: RwLockReadGuard<'a, T>,
-}
-
-struct RefMutArc<'a, T, const DIMS: usize> {
-    _chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
-    _guard_vec: Arc<RwLockReadGuard<'a, Chunk<T>>>,
-    guard: RwLockWriteGuard<'a, T>,
 }
 
 impl<T: Data, const DIMS: usize> Lazy<'_, T, DIMS> {
@@ -90,45 +82,41 @@ impl<T: Data, const DIMS: usize> Lazy<'_, T, DIMS> {
     /// Gets the inner value or initialize it if it's uninitialized.
     pub async fn get_or_init(&self) -> Result<&T, Error> {
         if let Some(value) = self.value.get() {
-            return Ok(match value {
-                Value::Ref(val) => &val.guard,
-                Value::RefMut(val) => &val.guard,
-                Value::Direct(val) => val,
-            });
+            return match value {
+                Value::Ref(val) => Ok(&val.guard),
+                Value::Direct(val) => Ok(val),
+            };
         }
 
-        match self.read_type {
-            ReadType::Mem {
-                ref chunk,
-                ref guard,
-                lock,
-            } => {
+        match &self.read_type {
+            ReadType::Mem { chunk, guard, lock } => {
                 let rg = lock.read().await;
-
-                if let Value::Ref(val) = self.value.get_or_init(|| {
-                    Value::Ref({
-                        RefArc {
-                            _chunk: chunk.clone(),
-                            _guard_vec: guard.clone(),
-                            guard: rg,
-                        }
-                    })
-                }) {
-                    Ok(&val.guard)
-                } else {
-                    unreachable!()
-                }
+                Ok(
+                    if let Value::Ref(val) = self.value.get_or_init(|| {
+                        Value::Ref({
+                            RefArc {
+                                _chunk: chunk.clone(),
+                                _guard_vec: guard.clone(),
+                                guard: rg,
+                            }
+                        })
+                    }) {
+                        &val.guard
+                    } else {
+                        unreachable!()
+                    },
+                )
             }
             ReadType::Io(ref bytes) => {
                 let _ = self.value.set(Value::Direct(
                     T::decode(self.dims.get().unwrap(), bytes.clone()).map_err(Error::Io)?,
                 ));
 
-                if let Some(Value::Direct(val)) = self.value.get() {
-                    Ok(val)
+                Ok(if let Some(Value::Direct(val)) = self.value.get() {
+                    val
                 } else {
                     unreachable!()
-                }
+                })
             }
         }
     }
@@ -140,11 +128,9 @@ type IoReadFuture<'a, Io> =
 enum ChunkFromIoIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     Pre {
         _world: &'a World<T, DIMS, Io>,
-        chunk: [usize; DIMS],
         future: Pin<Box<IoReadFuture<'a, Io>>>,
     },
     InProgress {
-        chunk: [usize; DIMS],
         read: Io::Read,
         progress: InProgress<DIMS>,
     },
@@ -185,12 +171,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match this {
-            ChunkFromIoIter::InProgress {
-                read,
-                progress,
-                chunk,
-                ..
-            } => match progress {
+            ChunkFromIoIter::InProgress { read, progress, .. } => match progress {
                 InProgress::Dims(dims) => {
                     for dim in &mut *dims {
                         if let U64Cache::Buf(buf) = dim {
@@ -240,15 +221,15 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                     match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
                         Ok(len_act) => {
                             if len == len_act {
-                                let lock = OnceLock::new();
-                                lock.set(*dims).unwrap();
-
                                 Poll::Ready(Some(Ok(Lazy {
                                     id: dims[0],
-                                    dims: lock,
+                                    dims: {
+                                        let lock = OnceLock::new();
+                                        lock.set(*dims).unwrap();
+                                        lock
+                                    },
                                     read_type: ReadType::Io(buf.clone().freeze()),
                                     value: OnceLock::new(),
-                                    chunk: *chunk,
                                 })))
                             } else {
                                 Poll::Ready(Some(Err(std::io::Error::new(
@@ -261,7 +242,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                     }
                 }
             },
-            ChunkFromIoIter::Pre { future, chunk, .. } => {
+            ChunkFromIoIter::Pre { future, .. } => {
                 *this = Self::InProgress {
                     read: match ready!(future.as_mut().poll(cx)) {
                         Ok(val) => val,
@@ -274,7 +255,6 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                         }
                     },
                     progress: InProgress::Dims([Default::default(); DIMS]),
-                    chunk: *chunk,
                 };
 
                 Pin::new(this).poll_next(cx)
@@ -285,7 +265,6 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
 
 struct ChunkFromMemIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     _world: &'a World<T, DIMS, Io>,
-    chunk_pos: [usize; DIMS],
 
     chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
     guard: Arc<RwLockReadGuard<'a, Chunk<T>>>,
@@ -300,7 +279,6 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
         let (id, lock) = self.iter.next()?;
         Some(Lazy {
             id: *id,
-            chunk: self.chunk_pos,
             dims: OnceLock::new(),
             read_type: ReadType::Mem {
                 chunk: self.chunk.clone(),
@@ -312,7 +290,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
     }
 }
 
-pub struct Iter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+pub struct IterMut<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
 
     shape: super::select::RawShapeIter<'a, DIMS>,
@@ -324,12 +302,11 @@ enum ChunkIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     MemReadChunk {
         map_ref: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
         fut: async_lock::futures::Read<'a, Chunk<T>>,
-        pos: [usize; DIMS],
     },
     Mem(ChunkFromMemIter<'a, T, DIMS, Io>),
 }
 
-impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for IterMut<'a, T, DIMS, Io> {
     type Item = Result<Lazy<'a, T, DIMS>, Error>;
 
     fn poll_next(
@@ -351,7 +328,6 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
             ChunkIter::MemReadChunk {
                 ref map_ref,
                 ref mut fut,
-                pos,
             } => {
                 let guard = ready!(Pin::new(fut).poll(cx));
                 this.current = ChunkIter::Mem(ChunkFromMemIter {
@@ -359,7 +335,6 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
                     chunk: map_ref.clone(),
                     iter: unsafe { std::mem::transmute(guard.iter()) },
                     guard: Arc::new(guard),
-                    chunk_pos: pos,
                 })
             }
         }
@@ -369,13 +344,11 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
                 this.current = ChunkIter::MemReadChunk {
                     fut: unsafe { std::mem::transmute(chunk_l.value().read()) },
                     map_ref: Arc::new(chunk_l),
-                    pos,
                 };
             } else {
                 this.current = ChunkIter::Io(ChunkFromIoIter::Pre {
                     _world: this.world,
                     future: this.world.io_handle.read_chunk(pos),
-                    chunk: pos,
                 });
             }
 
