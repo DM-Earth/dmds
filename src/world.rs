@@ -1,5 +1,4 @@
 pub mod iter;
-pub mod iter_mut;
 mod select;
 
 use std::ops::{Deref, DerefMut, RangeBounds, RangeInclusive};
