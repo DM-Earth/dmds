@@ -7,9 +7,9 @@ edition = "2021"
 
 [dependencies]
 thiserror = "1.0"
-dashmap = "5.5"
 async-lock = "2.8"
 async-trait = "0.1"
 futures-lite = "1.13"
 pin-project-lite = "0.2"
 bytes = "1.5"
+dashmap = "5.5"

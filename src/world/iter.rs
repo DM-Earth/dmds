@@ -57,7 +57,7 @@ enum Value<'a, T: Data, const DIMS: usize> {
 struct RefArc<'a, T, const DIMS: usize> {
     _chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
     _guard_vec: Arc<RwLockReadGuard<'a, Chunk<T>>>,
-    guard: RwLockReadGuard<'a, T>,
+    guard: Option<RwLockReadGuard<'a, T>>,
 }
 
 struct RefMutArc<'a, T, const DIMS: usize> {
@@ -73,30 +73,34 @@ impl<T: Data, const DIMS: usize> Lazy<'_, T, DIMS> {
             return Ok(dims);
         }
 
-        let val = self.get_or_init().await?;
+        let val = self.get().await?;
         let mut dims = [0_u64; DIMS];
         dims[0] = self.id;
 
         for (index, dim) in dims.iter_mut().enumerate() {
-            if index == 0 {
-                continue;
+            if index != 0 {
+                *dim = val.value_of(index);
             }
-            *dim = val.value_of(index);
         }
 
         Ok(self.dims.get_or_init(|| dims))
     }
 
     /// Gets the inner value or initialize it if it's uninitialized.
-    pub async fn get_or_init(&self) -> Result<&T, Error> {
+    pub async fn get(&self) -> Result<&T, Error> {
         if let Some(value) = self.value.get() {
-            return Ok(match value {
-                Value::Ref(val) => &val.guard,
+            Ok(match value {
+                Value::Ref(val) => val.guard.as_ref().unwrap(),
                 Value::RefMut(val) => &val.guard,
                 Value::Direct(val) => val,
-            });
+            })
+        } else {
+            self.init().await
         }
+    }
 
+    /// Initialize the inner value, immutably.
+    async fn init(&self) -> Result<&T, Error> {
         match self.read_type {
             ReadType::Mem {
                 ref chunk,
@@ -110,11 +114,11 @@ impl<T: Data, const DIMS: usize> Lazy<'_, T, DIMS> {
                         RefArc {
                             _chunk: chunk.clone(),
                             _guard_vec: guard.clone(),
-                            guard: rg,
+                            guard: Some(rg),
                         }
                     })
                 }) {
-                    Ok(&val.guard)
+                    Ok(val.guard.as_deref().unwrap())
                 } else {
                     unreachable!()
                 }
@@ -130,6 +134,44 @@ impl<T: Data, const DIMS: usize> Lazy<'_, T, DIMS> {
                     unreachable!()
                 }
             }
+        }
+    }
+
+    pub async fn get_mut(&mut self) -> Result<&mut T, Error> {
+        todo!()
+    }
+
+    async fn init_mut(&mut self) -> Result<&mut T, Error> {
+        match self.read_type {
+            ReadType::Mem {
+                ref chunk,
+                ref guard,
+                lock,
+            } => {
+                if let Some(Value::Ref(val)) = self.value.get_mut() {
+                    val.guard = None;
+                }
+
+                if let Some((val, dst)) = self
+                    .value
+                    .set(Value::RefMut(RefMutArc {
+                        _chunk: chunk.clone(),
+                        _guard_vec: guard.clone(),
+                        guard: lock.write().await,
+                    }))
+                    .err()
+                    .zip(self.value.get_mut())
+                {
+                    *dst = val
+                }
+
+                if let Some(Value::RefMut(val)) = self.value.get_mut() {
+                    Ok(&mut val.guard)
+                } else {
+                    unreachable!()
+                }
+            }
+            ReadType::Io(_) => todo!(),
         }
     }
 }
