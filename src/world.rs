@@ -1,7 +1,10 @@
 pub mod iter;
 mod select;
 
-use std::ops::{Deref, DerefMut, RangeBounds, RangeInclusive};
+use std::{
+    ops::{Deref, DerefMut, RangeBounds, RangeInclusive},
+    sync::Arc,
+};
 
 use async_lock::RwLock;
 use dashmap::{mapref, DashMap};
@@ -19,7 +22,7 @@ pub type Pos<const DIMS: usize> = [usize; DIMS];
 type Chunk<T> = Vec<(u64, RwLock<T>)>;
 
 pub struct World<T: Data, const DIMS: usize, Io: IoHandle> {
-    cache: DashMap<Pos<DIMS>, RwLock<Chunk<T>>>,
+    cache: DashMap<Pos<DIMS>, Arc<RwLock<Chunk<T>>>>,
     mappings: [SingleDimMapping; DIMS],
     io_handle: Io,
 }
@@ -103,57 +106,6 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             world: self,
             slice: Shape::Single(PosBox::new(arr)),
         }
-    }
-
-    pub async fn get<'a>(&'a self, chunk: &Pos<DIMS>, id: u64) -> Option<Ref<'a, T, DIMS>> {
-        let map_g: mapref::one::Ref<'a, _, _> = self.cache.get(chunk)?;
-        let vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>> =
-            unsafe { std::mem::transmute(map_g.value().read().await) };
-        let lock_g: async_lock::RwLockReadGuard<'a, T> =
-            unsafe { std::mem::transmute(vec_g.iter().find(|val| val.0 == id)?.1.read().await) };
-
-        Some(Ref {
-            map_g,
-            vec_g,
-            lock_g,
-        })
-    }
-}
-
-pub struct Ref<'a, T: Data, const DIMS: usize> {
-    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>,
-    vec_g: async_lock::RwLockReadGuard<'a, Chunk<T>>,
-    lock_g: async_lock::RwLockReadGuard<'a, T>,
-}
-
-impl<T: Data, const DIMS: usize> Deref for Ref<'_, T, DIMS> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &*self.lock_g
-    }
-}
-
-pub struct RefMut<'a, T: Data, const DIMS: usize> {
-    map_g: mapref::one::Ref<'a, Pos<DIMS>, RwLock<Vec<(u64, RwLock<T>)>>>,
-    vec_g: async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
-    lock_g: async_lock::RwLockWriteGuard<'a, T>,
-}
-
-impl<T: Data, const DIMS: usize> Deref for RefMut<'_, T, DIMS> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &*self.lock_g
-    }
-}
-
-impl<T: Data, const DIMS: usize> DerefMut for RefMut<'_, T, DIMS> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.lock_g
     }
 }
 

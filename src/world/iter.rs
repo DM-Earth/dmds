@@ -41,7 +41,7 @@ pub struct Lazy<'a, T: Data, const DIMS: usize> {
 
 enum ReadType<'a, T, const DIMS: usize> {
     Mem {
-        chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+        chunk: Arc<RwLock<Chunk<T>>>,
         guard: Arc<RwLockReadGuard<'a, Chunk<T>>>,
         lock: &'a RwLock<T>,
     },
@@ -55,13 +55,13 @@ enum Value<'a, T: Data, const DIMS: usize> {
 }
 
 struct RefArc<'a, T, const DIMS: usize> {
-    _chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+    _chunk: Arc<RwLock<Chunk<T>>>,
     _guard_vec: Arc<RwLockReadGuard<'a, Chunk<T>>>,
     guard: Option<RwLockReadGuard<'a, T>>,
 }
 
 struct RefMutArc<'a, T, const DIMS: usize> {
-    _chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+    _chunk: Arc<RwLock<Chunk<T>>>,
     _guard_vec: Arc<RwLockReadGuard<'a, Chunk<T>>>,
     guard: RwLockWriteGuard<'a, T>,
 }
@@ -329,7 +329,7 @@ struct ChunkFromMemIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     _world: &'a World<T, DIMS, Io>,
     chunk_pos: [usize; DIMS],
 
-    chunk: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+    chunk: Arc<RwLock<Chunk<T>>>,
     guard: Arc<RwLockReadGuard<'a, Chunk<T>>>,
 
     iter: std::slice::Iter<'a, (u64, RwLock<T>)>,
@@ -364,7 +364,7 @@ pub struct Iter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
 enum ChunkIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
-        map_ref: Arc<dashmap::mapref::one::Ref<'a, Pos<DIMS>, RwLock<Chunk<T>>>>,
+        map_ref: Arc<RwLock<Chunk<T>>>,
         fut: async_lock::futures::Read<'a, Chunk<T>>,
         pos: [usize; DIMS],
     },
@@ -410,7 +410,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
             if let Some(chunk_l) = this.world.cache.get(&pos) {
                 this.current = ChunkIter::MemReadChunk {
                     fut: unsafe { std::mem::transmute(chunk_l.value().read()) },
-                    map_ref: Arc::new(chunk_l),
+                    map_ref: chunk_l.value().clone(),
                     pos,
                 };
             } else {
