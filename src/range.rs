@@ -1,6 +1,7 @@
 use std::ops::{RangeBounds, RangeInclusive};
 
 /// Maps single-dimension value to chunks in a certain range.
+#[derive(Debug)]
 pub struct SingleDimMapping {
     range: RangeInclusive<u64>,
     /// Elements per chunk.
