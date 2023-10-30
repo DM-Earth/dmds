@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    ops::DerefMut,
     pin::Pin,
     sync::{Arc, OnceLock},
     task::Poll,
@@ -47,7 +48,7 @@ pub struct Lazy<'a, T, const DIMS: usize, Io: IoHandle> {
 
 /// Method of loading data.
 enum LoadMethod<'a, T, const DIMS: usize, Io: IoHandle> {
-    /// Load data from cached chunk in `World`.
+    /// Load data from buffer pool in `World`.
     Mem {
         chunk: Arc<Chunk<T, Io>>,
         guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
@@ -76,7 +77,7 @@ struct RefMutArc<'a, T, const DIMS: usize, Io: IoHandle> {
     guard: RwLockWriteGuard<'a, T>,
 }
 
-impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
     #[inline]
     pub fn id(&self) -> u64 {
         self.id
@@ -158,10 +159,20 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
     }
 
     pub async fn get_mut(&mut self) -> Result<&mut T, Error> {
-        todo!()
+        match self
+            .value
+            .get_mut()
+            // SAFETY: strange issue here, mysterious. Only this way could pass the compilation.
+            .map::<&'a mut LazyInner<'a, T, DIMS, Io>, _>(|e| unsafe {
+                &mut *(e as *mut LazyInner<'a, T, DIMS, Io>)
+            }) {
+            Some(LazyInner::RefMut(val)) => Ok(&mut val.guard),
+            Some(LazyInner::Direct(val)) => Ok(val),
+            _ => self.init_mut().await,
+        }
     }
 
-    async fn init_mut(&mut self) -> Result<&mut T, Error> {
+    pub(super) async fn init_mut(&mut self) -> Result<&mut T, Error> {
         match self.method {
             LoadMethod::Mem {
                 ref chunk,
@@ -186,55 +197,51 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> Lazy<'_, T, DIMS, Io> {
                 {
                     *dst = val
                 }
-
-                if let Some(LazyInner::RefMut(val)) = self.value.get_mut() {
-                    Ok(&mut val.guard)
-                } else {
-                    unreachable!()
-                }
             }
-            LoadMethod::Io(_) => {
-                self.world.load_chunk(self.chunk).await.map_err(Error::Io)?;
-                let chunk = self.world.cache.get(&self.chunk).unwrap().clone();
-                let guard = Arc::new(chunk.data.read().await);
-                let lock = &guard
-                    .iter()
-                    .find(|e| e.0 == self.id)
-                    .ok_or(Error::ValueNotFound)?
-                    .1;
-                if let Some(LazyInner::Ref(val)) = self.value.get_mut() {
-                    val.guard = None;
-                }
-
-                // set the value with locking behaviour,
-                // or override the value directly if value already exists.
-                if let Some((val, dst)) = self
-                    .value
-                    .set(LazyInner::RefMut(RefMutArc {
-                        _chunk: chunk.clone(),
-                        _guard: guard.clone(),
-                        guard: lock.write().await,
-                    }))
-                    .err()
-                    .zip(self.value.get_mut())
-                {
-                    *dst = val
-                }
-
-                let result: Result<&mut T, _> =
-                    if let Some(LazyInner::RefMut(val)) = self.value.get_mut() {
-                        Ok(unsafe { &mut *(&mut val.guard as *mut T) })
-                    } else {
-                        unreachable!()
-                    };
-                self.method = LoadMethod::Mem {
-                    lock: unsafe { &*(lock as *const RwLock<T>) },
-                    guard: unsafe { std::mem::transmute(guard) },
-                    chunk,
-                };
-                result
-            }
+            LoadMethod::Io(_) => unsafe { self.load_chunk() }.await?,
         }
+
+        if let Some(LazyInner::RefMut(val)) = self.value.get_mut() {
+            Ok(val.guard.deref_mut())
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// Load the chunk this data belongs to to buffer pool.
+    async unsafe fn load_chunk(&mut self) -> Result<(), Error> {
+        self.world.load_chunk(self.chunk).await;
+
+        let chunk = self.world.buf_pool.get(&self.chunk).unwrap().clone();
+        type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
+        let guard: Arc<Guard<'a, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
+        let lock = &*(&guard
+            .iter()
+            .find(|e| e.0 == self.id)
+            .ok_or(Error::ValueNotFound)?
+            .1 as *const RwLock<T>);
+
+        if let Some(LazyInner::Ref(val)) = self.value.get_mut() {
+            val.guard = None;
+        }
+
+        // set the value with locking behaviour,
+        // or override the value directly if value already exists.
+        if let Some((val, dst)) = self
+            .value
+            .set(LazyInner::RefMut(RefMutArc {
+                _chunk: chunk.clone(),
+                _guard: guard.clone(),
+                guard: lock.write().await,
+            }))
+            .err()
+            .zip(self.value.get_mut())
+        {
+            *dst = val
+        }
+
+        self.method = LoadMethod::Mem { lock, guard, chunk };
+        Ok(())
     }
 }
 
@@ -263,18 +270,18 @@ pub(super) enum ChunkFromIoIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
 /// - Data length in bytes
 /// - Data bytes
 pub(super) enum InProgress<const DIMS: usize> {
-    Dims([U64Cache; DIMS]),
+    Dims([U64Buf; DIMS]),
     Len([u8; 4], [u64; DIMS]),
     Data(bytes::BytesMut, [u64; DIMS]),
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum U64Cache {
+pub(super) enum U64Buf {
     Buf([u8; 8]),
     Num(u64),
 }
 
-impl Default for U64Cache {
+impl Default for U64Buf {
     #[inline]
     fn default() -> Self {
         Self::Buf([0; 8])
@@ -298,7 +305,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
             } => match progress {
                 InProgress::Dims(dims) => {
                     for dim in &mut *dims {
-                        if let U64Cache::Buf(buf) = dim {
+                        if let U64Buf::Buf(buf) = dim {
                             match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
                                 Ok(8) => (),
                                 Ok(actlen) => {
@@ -309,14 +316,14 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                                 }
                                 Err(err) => return Poll::Ready(Some(Err(err))),
                             }
-                            *dim = U64Cache::Num(u64::from_be_bytes(*buf));
+                            *dim = U64Buf::Num(u64::from_be_bytes(*buf));
                         }
                     }
 
                     *progress = InProgress::Len(
                         [0; 4],
                         (*dims).map(|e| {
-                            if let U64Cache::Num(num) = e {
+                            if let U64Buf::Num(num) = e {
                                 num
                             } else {
                                 unreachable!()
@@ -479,7 +486,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
         }
 
         if let Some(pos) = this.shape.next() {
-            if let Some(chunk_l) = this.world.cache.get(&pos) {
+            if let Some(chunk_l) = this.world.buf_pool.get(&pos) {
                 this.current = Some(ChunkIter::MemReadChunk {
                     fut: unsafe { std::mem::transmute(chunk_l.value().data.read()) },
                     map_ref: chunk_l.value().clone(),

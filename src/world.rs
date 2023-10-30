@@ -22,7 +22,7 @@ use self::select::{PosBox, Shape};
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 type ChunkData<T> = Vec<(u64, RwLock<T>)>;
 
-/// A cached chunk.
+/// A buffered chunk.
 #[derive(Debug)]
 struct Chunk<T, Io: IoHandle> {
     /// The inner data of this chunk.
@@ -41,8 +41,8 @@ struct Chunk<T, Io: IoHandle> {
 /// A world representing collections of single type of
 /// data stored in multi-dimensional chunks.
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
-    /// Cached chunks of this world, for modifying data.
-    cache: DashMap<Pos<DIMS>, Arc<Chunk<T, Io>>>,
+    /// Buffered chunks of this world, for modifying data.
+    buf_pool: DashMap<Pos<DIMS>, Arc<Chunk<T, Io>>>,
 
     /// Dimension information of this world.
     mappings: [SingleDimMapping; DIMS],
@@ -79,7 +79,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         );
 
         Self {
-            cache: DashMap::new(),
+            buf_pool: DashMap::new(),
             mappings: dims.map(|value| SingleDimMapping::new(value.range, value.items_per_chunk)),
             io_handle,
         }
@@ -142,12 +142,9 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     }
 
     /// Load the chunk of given chunk position, through IO operation.
-    async fn load_chunk(&self, pos: Pos<DIMS>) -> std::io::Result<()> {
-        if self.cache.contains_key(&pos) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "chunk already exists in cache",
-            ));
+    async fn load_chunk(&self, pos: Pos<DIMS>) {
+        if self.buf_pool.contains_key(&pos) {
+            return;
         }
 
         let selection = Select {
@@ -170,14 +167,11 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         // There are await points before this point, so
         // double-check if the chunk exists.
-        if self.cache.contains_key(&pos) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "chunk already exists in cache",
-            ));
+        if self.buf_pool.contains_key(&pos) {
+            return;
         }
 
-        self.cache.insert(
+        self.buf_pool.insert(
             pos,
             Arc::new(Chunk {
                 data: RwLock::new(items),
@@ -185,8 +179,6 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 dirty: AtomicBool::new(false),
             }),
         );
-
-        Ok(())
     }
 }
 
