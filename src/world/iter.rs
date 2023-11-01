@@ -1,8 +1,8 @@
 use std::{
     future::Future,
-    ops::DerefMut,
+    ops::{Deref, DerefMut},
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{atomic, Arc, OnceLock},
     task::Poll,
 };
 
@@ -30,8 +30,8 @@ pub enum Error {
 }
 
 /// A type load data lazily.
-pub struct Lazy<'a, T, const DIMS: usize, Io: IoHandle> {
-    world: &'a World<T, DIMS, Io>,
+pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
+    world: &'w World<T, DIMS, Io>,
     /// Pre-loaded identifier of this data.
     id: u64,
 
@@ -41,43 +41,43 @@ pub struct Lazy<'a, T, const DIMS: usize, Io: IoHandle> {
     /// Position of chunk this data belongs to.
     chunk: Pos<DIMS>,
 
-    method: LoadMethod<'a, T, DIMS, Io>,
+    method: LoadMethod<'w, T, DIMS>,
     /// The inner data.
-    value: OnceLock<LazyInner<'a, T, DIMS, Io>>,
+    value: OnceLock<LazyInner<'w, T, DIMS>>,
 }
 
 /// Method of loading data.
-enum LoadMethod<'a, T, const DIMS: usize, Io: IoHandle> {
+enum LoadMethod<'w, T, const DIMS: usize> {
     /// Load data from buffer pool in `World`.
     Mem {
-        chunk: Arc<Chunk<T, Io>>,
-        guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
-        lock: &'a RwLock<T>,
+        chunk: Arc<Chunk<T>>,
+        guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
+        lock: &'w RwLock<T>,
     },
 
     /// Decode data from bytes.
     Io(bytes::Bytes),
 }
 
-enum LazyInner<'a, T, const DIMS: usize, Io: IoHandle> {
-    Ref(RefArc<'a, T, DIMS, Io>),
-    RefMut(RefMutArc<'a, T, DIMS, Io>),
+enum LazyInner<'w, T, const DIMS: usize> {
+    Ref(RefArc<'w, T, DIMS>),
+    RefMut(RefMutArc<'w, T, DIMS>),
     Direct(T),
 }
 
-struct RefArc<'a, T, const DIMS: usize, Io: IoHandle> {
-    _chunk: Arc<Chunk<T, Io>>,
-    _guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
-    guard: Option<RwLockReadGuard<'a, T>>,
+struct RefArc<'w, T, const DIMS: usize> {
+    _chunk: Arc<Chunk<T>>,
+    _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
+    guard: Option<RwLockReadGuard<'w, T>>,
 }
 
-struct RefMutArc<'a, T, const DIMS: usize, Io: IoHandle> {
-    _chunk: Arc<Chunk<T, Io>>,
-    _guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
-    guard: RwLockWriteGuard<'a, T>,
+struct RefMutArc<'w, T, const DIMS: usize> {
+    _chunk: Arc<Chunk<T>>,
+    _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
+    guard: RwLockWriteGuard<'w, T>,
 }
 
-impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
+impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     #[inline]
     pub fn id(&self) -> u64 {
         self.id
@@ -163,8 +163,8 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
             .value
             .get_mut()
             // SAFETY: strange issue here, mysterious. Only this way could pass the compilation.
-            .map::<&'a mut LazyInner<'a, T, DIMS, Io>, _>(|e| unsafe {
-                &mut *(e as *mut LazyInner<'a, T, DIMS, Io>)
+            .map::<&'w mut LazyInner<'w, T, DIMS>, _>(|e| unsafe {
+                &mut *(e as *mut LazyInner<'w, T, DIMS>)
             }) {
             Some(LazyInner::RefMut(val)) => Ok(&mut val.guard),
             Some(LazyInner::Direct(val)) => Ok(val),
@@ -183,13 +183,14 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
                     val.guard = None;
                 }
 
-                // set the value with locking behaviour,
+                // Set the value with locking behaviour,
                 // or override the value directly if value already exists.
                 if let Some((val, dst)) = self
                     .value
                     .set(LazyInner::RefMut(RefMutArc {
                         _chunk: chunk.clone(),
                         _guard: guard.clone(),
+                        // Obtain the value lock's write guard here
                         guard: lock.write().await,
                     }))
                     .err()
@@ -197,6 +198,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
                 {
                     *dst = val
                 }
+                chunk.writes.fetch_add(1, atomic::Ordering::AcqRel);
             }
             LoadMethod::Io(_) => unsafe { self.load_chunk() }.await?,
         }
@@ -214,7 +216,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
 
         let chunk = self.world.buf_pool.get(&self.chunk).unwrap().clone();
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
-        let guard: Arc<Guard<'a, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
+        let guard: Arc<Guard<'w, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
         let lock = &*(&guard
             .iter()
             .find(|e| e.0 == self.id)
@@ -245,10 +247,38 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'a, T, DIMS, Io> {
     }
 }
 
+pub struct LazyMutGuard<'w, 's, T, const DIMS: usize, Io: IoHandle> {
+    world: &'w World<T, DIMS, Io>,
+    value: &'s mut T,
+}
+
+impl<T, const DIMS: usize, Io: IoHandle> Deref for LazyMutGuard<'_, '_, T, DIMS, Io> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.value
+    }
+}
+
+impl<T, const DIMS: usize, Io: IoHandle> DerefMut for LazyMutGuard<'_, '_, T, DIMS, Io> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value
+    }
+}
+
+impl<T, const DIMS: usize, Io: IoHandle> Drop for LazyMutGuard<'_, '_, T, DIMS, Io> {
+    #[inline]
+    fn drop(&mut self) {
+        self.world.tick_executor()
+    }
+}
+
 type IoReadFuture<'a, Io> =
     dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read>> + Send + 'a;
 
-pub(super) enum ChunkFromIoIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+pub(super) enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Pre {
         world: &'a World<T, DIMS, Io>,
         chunk: [usize; DIMS],
@@ -296,6 +326,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
         match this {
             ChunkFromIoIter::InProgress {
                 read,
@@ -401,11 +432,11 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
     }
 }
 
-pub(super) struct ChunkFromMemIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+pub(super) struct ChunkFromMemIter<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     chunk_pos: [usize; DIMS],
 
-    chunk: Arc<Chunk<T, Io>>,
+    chunk: Arc<Chunk<T>>,
     guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
 
     iter: std::slice::Iter<'a, (u64, RwLock<T>)>,
@@ -432,17 +463,17 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
 }
 
 /// An `Iterator` that iterates over a selection.
-pub struct Iter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+pub struct Iter<'a, T, const DIMS: usize, Io: IoHandle> {
     pub(super) world: &'a World<T, DIMS, Io>,
 
     pub(super) shape: super::select::RawShapeIter<'a, DIMS>,
     pub(super) current: Option<ChunkIter<'a, T, DIMS, Io>>,
 }
 
-pub(super) enum ChunkIter<'a, T: Data, const DIMS: usize, Io: IoHandle> {
+pub(super) enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
-        map_ref: Arc<Chunk<T, Io>>,
+        map_ref: Arc<Chunk<T>>,
         fut: async_lock::futures::Read<'a, Vec<(u64, RwLock<T>)>>,
         pos: [usize; DIMS],
     },

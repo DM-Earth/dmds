@@ -2,10 +2,12 @@ pub mod iter;
 mod select;
 
 use std::{
+    future::Future,
     ops::{RangeBounds, RangeInclusive},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::AtomicU16, Arc},
 };
 
+use async_executor::LocalExecutor;
 use async_lock::RwLock;
 use dashmap::DashMap;
 use futures_lite::StreamExt;
@@ -24,36 +26,56 @@ type ChunkData<T> = Vec<(u64, RwLock<T>)>;
 
 /// A buffered chunk.
 #[derive(Debug)]
-struct Chunk<T, Io: IoHandle> {
+struct Chunk<T> {
     /// The inner data of this chunk.
     data: RwLock<ChunkData<T>>,
 
-    /// The future used to be polled after most
-    /// operations to this chunk,
-    /// to write this chunk through IO operations
-    /// without awating in the operation future.
-    write_fut: std::sync::Mutex<Option<Io::Write>>,
-
     /// Indicates whether this chunk has been updated.
-    dirty: AtomicBool,
+    writes: AtomicU16,
+    /// Lock indicates whether a task is handling this chunk.
+    lock: async_lock::Mutex<()>,
+    /// Lock indicates whether a task is currently
+    /// writing this chunk.
+    lock_w: async_lock::Mutex<()>,
 }
 
 /// A world representing collections of single type of
 /// data stored in multi-dimensional chunks.
+///
+/// # Data layout of a chunk
+///
+/// Chunks should be saved in bytes, so all items should be saved in bytes.
+/// A saved chunk is a combination of bytes of items, so it should be `[item0][item1][item2]..`.
+///
+/// Layout of an item should be like this: (for example, if we have 2+ dimensions)
+///
+/// ```
+///   Dimension Values
+///   ________________________________________________________________________
+///  /                                                                       /
+/// ┌───────────────────────┬───────────────────────┬───────────────────────┬──────────────────────────────┬──────┐
+/// │ Dim Value 0 (u64, be) │ Dim Value 1 (u64, be) │ .. (other dimensions) │ Data Length (u32, be, bytes) │ Data │
+/// └───────────────────────┴───────────────────────┴───────────────────────┴──────────────────────────────┴──────┘
+/// ```
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.
-    buf_pool: DashMap<Pos<DIMS>, Arc<Chunk<T, Io>>>,
+    buf_pool: DashMap<Pos<DIMS>, Arc<Chunk<T>>>,
+    io_handle: Io,
+
+    executor: LocalExecutor<'static>,
 
     /// Dimension information of this world.
     mappings: [SingleDimMapping; DIMS],
-
-    /// IO handler.
-    io_handle: Io,
+    /// Limit of buffered chunks in this world,
+    /// if possible to clean.
+    ///
+    /// `0` means no limit.
+    chunks_limit: usize,
 }
 
 /// Descripts information of a single dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DimDescriptor<R> {
+pub struct Dim<R> {
     /// Range of values in this dimension.
     pub range: R,
 
@@ -61,28 +83,11 @@ pub struct DimDescriptor<R> {
     pub items_per_chunk: usize,
 }
 
-impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
-    /// Creates a new world.
-    ///
-    /// # Panics
-    ///
-    /// Panics when count of given dimensions and the
-    /// dimension count of data are different.
-    pub fn new<R>(dims: [DimDescriptor<R>; DIMS], io_handle: Io) -> Self
-    where
-        R: std::ops::RangeBounds<u64>,
-    {
-        assert_eq!(
-            T::DIMS,
-            DIMS,
-            "dimensions count of type and generic parameter should be equal"
-        );
-
-        Self {
-            buf_pool: DashMap::new(),
-            mappings: dims.map(|value| SingleDimMapping::new(value.range, value.items_per_chunk)),
-            io_handle,
-        }
+impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
+    /// Set the count limit of buffered chunks in this world.
+    #[inline]
+    pub fn set_chunks_limit(&mut self, limit: Option<usize>) {
+        self.chunks_limit = limit.unwrap_or_default()
     }
 
     /// Select from a value in the given dimension.
@@ -141,10 +146,54 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         }
     }
 
+    #[inline]
+    pub fn tick_executor(&self) {
+        self.executor.try_tick();
+    }
+
+    #[inline]
+    fn should_clean_buf_pool(&self) -> bool {
+        self.buf_pool.len() > self.chunks_limit && self.chunks_limit != 0
+    }
+}
+
+impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
+    /// Creates a new world.
+    ///
+    /// # Panics
+    ///
+    /// Panics when count of given dimensions and the
+    /// dimension count of data are different.
+    pub fn new<R>(dims: [Dim<R>; DIMS], io_handle: Io) -> Self
+    where
+        R: std::ops::RangeBounds<u64>,
+    {
+        assert_eq!(
+            T::DIMS,
+            DIMS,
+            "dimensions count of type and generic parameter should be equal"
+        );
+        assert!(DIMS > 0, "there should be at least 1 dimension");
+
+        Self {
+            buf_pool: DashMap::new(),
+            chunks_limit: 64,
+            mappings: dims.map(|value| SingleDimMapping::new(value.range, value.items_per_chunk)),
+            io_handle,
+            executor: LocalExecutor::new(),
+        }
+    }
+
     /// Load the chunk of given chunk position, through IO operation.
     async fn load_chunk(&self, pos: Pos<DIMS>) {
         if self.buf_pool.contains_key(&pos) {
             return;
+        }
+
+        // Clean buffer pool if it reaches the limit.
+        if self.should_clean_buf_pool() {
+            self.buf_pool
+                .retain(|_, chunk| chunk.writes.load(std::sync::atomic::Ordering::Acquire) > 0);
         }
 
         let selection = Select {
@@ -175,10 +224,16 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             pos,
             Arc::new(Chunk {
                 data: RwLock::new(items),
-                write_fut: std::sync::Mutex::new(None),
-                dirty: AtomicBool::new(false),
+                writes: AtomicU16::new(0),
+                lock: async_lock::Mutex::new(()),
+                lock_w: async_lock::Mutex::new(()),
             }),
         );
+    }
+
+    fn schedule_save_chunk(&self, chunk: &Pos<DIMS>) -> std::io::Result<()> {
+        self.executor.spawn(async { todo!() }).detach();
+        Ok(())
     }
 }
 
@@ -188,7 +243,7 @@ pub struct Select<'a, T, const DIMS: usize, Io: IoHandle> {
     slice: Shape<DIMS>,
 }
 
-impl<T: Data, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
+impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// Select a range of chunks in the given dimension,
     /// and intersect with current selection.
     #[inline]

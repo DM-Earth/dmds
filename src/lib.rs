@@ -28,7 +28,7 @@ pub trait Data: Sized + Send + Sync {
 #[async_trait]
 pub trait IoHandle: Send + Sync {
     type Read: AsyncRead + Unpin + Send + Sync;
-    type Write: AsyncWrite + Unpin + Send + Sync;
+    type Write: WriteFinish + Unpin + Send + Sync;
 
     async fn read_chunk<const DIMS: usize>(
         &self,
@@ -39,4 +39,13 @@ pub trait IoHandle: Send + Sync {
         &self,
         pos: [usize; DIMS],
     ) -> std::io::Result<Self::Write>;
+}
+
+/// Trait representing IO types that perform
+/// some async actions after all bytes are wrote.
+pub trait WriteFinish: AsyncWrite {
+    fn poll_finish(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>>;
 }
