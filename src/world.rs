@@ -45,7 +45,7 @@ struct Chunk<T> {
 ///
 /// Layout of an item should be like this: (for example, if we have 2+ dimensions)
 ///
-/// ```
+/// ```txt
 ///   Dimension Values
 ///   ________________________________________________________________________
 ///  /                                                                       /
