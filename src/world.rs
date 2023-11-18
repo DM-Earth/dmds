@@ -2,12 +2,10 @@ pub mod iter;
 mod select;
 
 use std::{
-    future::Future,
     ops::{RangeBounds, RangeInclusive},
     sync::{atomic::AtomicU16, Arc},
 };
 
-use async_executor::LocalExecutor;
 use async_lock::RwLock;
 use dashmap::DashMap;
 use futures_lite::StreamExt;
@@ -32,8 +30,6 @@ struct Chunk<T> {
 
     /// Indicates whether this chunk has been updated.
     writes: AtomicU16,
-    /// Lock indicates whether a task is handling this chunk.
-    lock: async_lock::Mutex<()>,
     /// Lock indicates whether a task is currently
     /// writing this chunk.
     lock_w: async_lock::Mutex<()>,
@@ -62,8 +58,6 @@ pub struct World<T, const DIMS: usize, Io: IoHandle> {
     buf_pool: DashMap<Pos<DIMS>, Arc<Chunk<T>>>,
     io_handle: Io,
 
-    executor: LocalExecutor<'static>,
-
     /// Dimension information of this world.
     mappings: [SingleDimMapping; DIMS],
     /// Limit of buffered chunks in this world,
@@ -73,7 +67,7 @@ pub struct World<T, const DIMS: usize, Io: IoHandle> {
     chunks_limit: usize,
 }
 
-/// Descripts information of a single dimension.
+/// Describes information of a single dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dim<R> {
     /// Range of values in this dimension.
@@ -147,11 +141,6 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     }
 
     #[inline]
-    pub fn tick_executor(&self) {
-        self.executor.try_tick();
-    }
-
-    #[inline]
     fn should_clean_buf_pool(&self) -> bool {
         self.buf_pool.len() > self.chunks_limit && self.chunks_limit != 0
     }
@@ -173,14 +162,13 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             DIMS,
             "dimensions count of type and generic parameter should be equal"
         );
-        assert!(DIMS > 0, "there should be at least 1 dimension");
+        assert_ne!(DIMS, 0, "there should be at least 1 dimensions");
 
         Self {
             buf_pool: DashMap::new(),
-            chunks_limit: 64,
+            chunks_limit: 24,
             mappings: dims.map(|value| SingleDimMapping::new(value.range, value.items_per_chunk)),
             io_handle,
-            executor: LocalExecutor::new(),
         }
     }
 
@@ -225,19 +213,13 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             Arc::new(Chunk {
                 data: RwLock::new(items),
                 writes: AtomicU16::new(0),
-                lock: async_lock::Mutex::new(()),
                 lock_w: async_lock::Mutex::new(()),
             }),
         );
     }
-
-    fn schedule_save_chunk(&self, chunk: &Pos<DIMS>) -> std::io::Result<()> {
-        self.executor.spawn(async { todo!() }).detach();
-        Ok(())
-    }
 }
 
-/// Celection of chunks.
+/// A selection of chunks.
 pub struct Select<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     slice: Shape<DIMS>,
@@ -277,7 +259,7 @@ impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     }
 
     /// Returns an async iterator (or `Stream`) of this selection
-    /// that iterate datas.
+    /// that iterate data items.
     #[inline]
     pub fn iter(&self) -> iter::Iter<'_, T, DIMS, Io> {
         iter::Iter {

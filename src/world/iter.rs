@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    ops::{Deref, DerefMut},
     pin::Pin,
     sync::{atomic, Arc, OnceLock},
     task::Poll,
@@ -8,7 +7,7 @@ use std::{
 
 use async_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use bytes::BufMut;
-use futures_lite::{ready, AsyncRead, Stream};
+use futures_lite::{pin, ready, AsyncRead, Stream};
 
 use crate::{Data, IoHandle};
 
@@ -17,7 +16,7 @@ use super::{Chunk, ChunkData, Pos, World};
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("io err: {0}")]
-    Io(futures_lite::io::Error),
+    Io(std::io::Error),
     #[error("requiring value has been taken")]
     ValueTaken,
     #[error("requiring value not found")]
@@ -110,7 +109,8 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         Ok(self.dims.get_or_init(|| dims))
     }
 
-    /// Gets the inner value or initialize it if it's uninitialized.
+    /// Gets the inner value immutably or initialize it
+    /// if it's uninitialized.
     pub async fn get(&self) -> Result<&T, Error> {
         match self.value.get() {
             Some(LazyInner::Ref(val)) => val.guard.as_deref().ok_or(Error::ValueNotFound),
@@ -120,7 +120,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
     }
 
-    /// Initialize the inner value, immutably.
+    /// Initialize the inner value immutably.
     pub(super) async fn init(&self) -> Result<&T, Error> {
         match self.method {
             LoadMethod::Mem {
@@ -158,20 +158,24 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
     }
 
+    /// Gets the inner value mutably or initialize it
+    /// if it's uninitialized.
     pub async fn get_mut(&mut self) -> Result<&mut T, Error> {
-        match self
+        if let Some(LazyInner::RefMut(val)) = self
             .value
             .get_mut()
             // SAFETY: strange issue here, mysterious. Only this way could pass the compilation.
             .map::<&'w mut LazyInner<'w, T, DIMS>, _>(|e| unsafe {
                 &mut *(e as *mut LazyInner<'w, T, DIMS>)
-            }) {
-            Some(LazyInner::RefMut(val)) => Ok(&mut val.guard),
-            Some(LazyInner::Direct(val)) => Ok(val),
-            _ => self.init_mut().await,
+            })
+        {
+            Ok(&mut val.guard)
+        } else {
+            self.init_mut().await
         }
     }
 
+    /// Initialize the inner value mutably.
     pub(super) async fn init_mut(&mut self) -> Result<&mut T, Error> {
         match self.method {
             LoadMethod::Mem {
@@ -183,7 +187,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
                     val.guard = None;
                 }
 
-                // Set the value with locking behaviour,
+                // Set the value with locking behavior,
                 // or override the value directly if value already exists.
                 if let Some((val, dst)) = self
                     .value
@@ -204,18 +208,21 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
 
         if let Some(LazyInner::RefMut(val)) = self.value.get_mut() {
-            Ok(val.guard.deref_mut())
+            Ok(&mut val.guard)
         } else {
             unreachable!()
         }
     }
 
-    /// Load the chunk this data belongs to to buffer pool.
+    /// Load the chunk this data belongs to to the buffer pool,
+    /// and fill this instance's lazy value with target data in chunk.
     async unsafe fn load_chunk(&mut self) -> Result<(), Error> {
         self.world.load_chunk(self.chunk).await;
 
         let chunk = self.world.buf_pool.get(&self.chunk).unwrap().clone();
+        // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
+        // SAFETY: wrapping lifetime to 'w.
         let guard: Arc<Guard<'w, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
         let lock = &*(&guard
             .iter()
@@ -227,7 +234,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
             val.guard = None;
         }
 
-        // set the value with locking behaviour,
+        // Set the value with locking behavior,
         // or override the value directly if value already exists.
         if let Some((val, dst)) = self
             .value
@@ -244,34 +251,6 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
         self.method = LoadMethod::Mem { lock, guard, chunk };
         Ok(())
-    }
-}
-
-pub struct LazyMutGuard<'w, 's, T, const DIMS: usize, Io: IoHandle> {
-    world: &'w World<T, DIMS, Io>,
-    value: &'s mut T,
-}
-
-impl<T, const DIMS: usize, Io: IoHandle> Deref for LazyMutGuard<'_, '_, T, DIMS, Io> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.value
-    }
-}
-
-impl<T, const DIMS: usize, Io: IoHandle> DerefMut for LazyMutGuard<'_, '_, T, DIMS, Io> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
-    }
-}
-
-impl<T, const DIMS: usize, Io: IoHandle> Drop for LazyMutGuard<'_, '_, T, DIMS, Io> {
-    #[inline]
-    fn drop(&mut self) {
-        self.world.tick_executor()
     }
 }
 
@@ -474,7 +453,7 @@ pub(super) enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
         map_ref: Arc<Chunk<T>>,
-        fut: async_lock::futures::Read<'a, Vec<(u64, RwLock<T>)>>,
+        fut: crate::UnpinRwlRead<'a, Vec<(u64, RwLock<T>)>>,
         pos: [usize; DIMS],
     },
     Mem(ChunkFromMemIter<'a, T, DIMS, Io>),
