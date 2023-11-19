@@ -49,19 +49,3 @@ pub trait WriteFinish: AsyncWrite {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>>;
 }
-
-#[derive(Debug)]
-struct UnpinRwlRead<'a, T: ?Sized>(async_lock::futures::Read<'a, T>);
-
-impl<T: ?Sized + Unpin> Unpin for UnpinRwlRead<'_, T> {}
-impl<'a, T: ?Sized + Unpin> std::future::Future for UnpinRwlRead<'a, T> {
-    type Output = <async_lock::futures::Read<'a, T> as std::future::Future>::Output;
-
-    #[inline]
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        unsafe { std::pin::Pin::new_unchecked(&mut self.get_mut().0).poll(cx) }
-    }
-}

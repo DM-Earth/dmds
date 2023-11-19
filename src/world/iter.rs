@@ -7,7 +7,7 @@ use std::{
 
 use async_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use bytes::BufMut;
-use futures_lite::{pin, ready, AsyncRead, Stream};
+use futures_lite::{ready, AsyncRead, FutureExt, Stream};
 
 use crate::{Data, IoHandle};
 
@@ -453,7 +453,13 @@ pub(super) enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
         map_ref: Arc<Chunk<T>>,
-        fut: crate::UnpinRwlRead<'a, Vec<(u64, RwLock<T>)>>,
+        fut: Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
+                    > + 'a,
+            >,
+        >,
         pos: [usize; DIMS],
     },
     Mem(ChunkFromMemIter<'a, T, DIMS, Io>),
@@ -498,7 +504,8 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
         if let Some(pos) = this.shape.next() {
             if let Some(chunk_l) = this.world.buf_pool.get(&pos) {
                 this.current = Some(ChunkIter::MemReadChunk {
-                    fut: unsafe { std::mem::transmute(chunk_l.value().data.read()) },
+                    // SAFETY: wrapping lifetime
+                    fut: unsafe { std::mem::transmute(chunk_l.value().data.read().boxed()) },
                     map_ref: chunk_l.value().clone(),
                     pos,
                 });
