@@ -1,3 +1,3 @@
-# SubDB
+# DMDs
 
-SubDB is multi-dimensional database embedded in your program.
+DMDs is multi-dimensional database embedded in your program.
