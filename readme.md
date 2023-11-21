@@ -1,3 +1,3 @@
-# DMDs
+# dmds
 
-DMDs is multi-dimensional database embedded in your program.
+dmds is multi-dimensional database embedded in your program.
