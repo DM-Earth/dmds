@@ -3,14 +3,15 @@ mod select;
 
 use std::{
     ops::{RangeBounds, RangeInclusive},
-    sync::{atomic::AtomicU16, Arc},
+    sync::{atomic::AtomicUsize, Arc},
 };
 
 use async_lock::RwLock;
+use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
 use futures_lite::StreamExt;
 
-use crate::{range::SingleDimMapping, Data, IoHandle};
+use crate::{range::DimMapping, Data, IoHandle};
 
 use self::select::{PosBox, Shape};
 
@@ -23,27 +24,13 @@ pub type Pos<const DIMS: usize> = [usize; DIMS];
 type ChunkData<T> = Vec<(u64, RwLock<T>)>;
 
 /// A buffered chunk.
-#[derive(Debug)]
-struct Chunk<T> {
-    /// The inner data of this chunk.
-    data: RwLock<ChunkData<T>>,
-
-    /// Indicates whether this chunk has been updated.
-    writes: AtomicU16,
-    /// Lock indicates whether a task is currently
-    /// writing this chunk.
-    lock_w: async_lock::Mutex<()>,
-}
-
-/// A world representing collections of single type of
-/// data stored in multi-dimensional chunks.
 ///
-/// # Data layout of a chunk
+/// # Data layout
 ///
-/// Chunks should be saved in bytes, so all items should be saved in bytes.
-/// A saved chunk is a combination of bytes of items, so it should be `[item0][item1][item2]..`.
+/// A chunk should be saved in bytes, so all items should be saved in bytes.
+/// A saved chunk is a combination of bytes of items, so it should be `[item0][item1][item2]..` .
 ///
-/// Layout of an item should be like this: (for example, if we have 2+ dimensions)
+/// Layout of an item should be like this (for example if we have 2+ dimensions):
 ///
 /// ```txt
 ///   Dimension Values
@@ -53,13 +40,152 @@ struct Chunk<T> {
 /// │ Dim Value 0 (u64, be) │ Dim Value 1 (u64, be) │ .. (other dimensions) │ Data Length (u32, be, bytes) │ Data │
 /// └───────────────────────┴───────────────────────┴───────────────────────┴──────────────────────────────┴──────┘
 /// ```
+#[derive(Debug)]
+pub struct ChunkBuf<T, const DIMS: usize> {
+    /// The inner data of this chunk.
+    data: RwLock<ChunkData<T>>,
+
+    /// Indicates whether this chunk has been updated.
+    writes: AtomicUsize,
+
+    /// `Mutex` indicates whether a task is currently
+    /// writing this chunk.
+    lock_w: std::sync::Mutex<()>,
+
+    mappings: Arc<[DimMapping; DIMS]>,
+    pos: Pos<DIMS>,
+}
+
+impl<T, const DIMS: usize> ChunkBuf<T, DIMS> {
+    pub fn pos(&self) -> &Pos<DIMS> {
+        &self.pos
+    }
+}
+
+impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
+    /// Write this chunk to the given buffer, as bytes.
+    ///
+    /// After writing to the bytes buffer successfully,
+    /// the writes count will be reseted. See [`Self::writes`].
+    ///
+    /// For the data layout, see [`World`].
+    pub async fn write_buf<B: BufMut>(&self, mut buf: B) -> std::io::Result<()> {
+        // Obtain the write lock guard
+        let Ok(_) = self.lock_w.try_lock() else {
+            return Ok(());
+        };
+
+        let datas_read = self.data.read().await;
+        for data in datas_read.iter() {
+            let data_read = data.1.read().await;
+            debug_assert_eq!(data.0, data_read.value_of(0), "data id should be immutable");
+            buf.put_u64(data.0);
+            for dim_i in 1..T::DIMS {
+                buf.put_u64(data_read.value_of(dim_i));
+            }
+
+            let mut bytes = BytesMut::new();
+            data_read.encode(&mut bytes)?;
+            buf.put_u32(bytes.len() as u32);
+            buf.put(bytes);
+        }
+        Ok(())
+    }
+
+    /// Insert the given data to this chunk buffer.
+    ///
+    /// If data with the id already exists, the data
+    /// will be replaced by the given data, and be
+    /// returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics when dimension values of the given data
+    /// is invalid for this chunk.
+    pub async fn insert(&self, data: T) -> Option<T> {
+        let mut vals = [0; DIMS];
+        for i in 0..DIMS {
+            vals[i] = data.value_of(i);
+        }
+
+        assert!(self.vals_in_range(vals), "given data is invalid to this chunk. data dimension values: {vals:?}, chunk position: {:?}", self.pos);
+
+        {
+            let r = self.data.write().await;
+            if let Some((_, d)) = r.iter().find(|v| v.0 == vals[0]) {
+                let mut wd = d.write().await;
+                let mut data = data;
+                std::mem::swap(&mut data, &mut wd);
+                return Some(data);
+            }
+        }
+
+        self.data.write().await.push((vals[0], RwLock::new(data)));
+        None
+    }
+
+    /// Insert the given data to this chunk buffer.
+    ///
+    /// If data with the id already exists, or the
+    /// dimension values of the given data is invalid
+    /// for this chunk, the given data will be returned
+    /// in `Err` variant in `Result`.
+    pub async fn try_insert(&self, data: T) -> Result<(), T> {
+        let mut vals = [0; DIMS];
+        for i in 0..DIMS {
+            vals[i] = data.value_of(i);
+        }
+
+        if !self.vals_in_range(vals) {
+            return Err(data);
+        }
+
+        let mut w = self.data.write().await;
+
+        if let Some(_) = w.iter_mut().find(|v| v.0 == vals[0]) {
+            Err(data)
+        } else {
+            w.push((vals[0], RwLock::new(data)));
+            Ok(())
+        }
+    }
+
+    /// Gets the count of writes to this chunk buffer.
+    #[inline]
+    pub fn writes(&self) -> usize {
+        self.writes.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Validates the given chunk position to dim mappings
+    /// of this world.
+    #[inline]
+    fn vals_in_range(&self, dim_vals: [u64; DIMS]) -> bool {
+        for ((a, b), c) in self
+            .mappings
+            .iter()
+            .zip(self.pos.into_iter())
+            .zip(dim_vals.into_iter())
+        {
+            if !a.chunk_of(c).map_or(false, |e| e == b) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// A world represent bunch of single type of
+/// data stored in multi-dimensional chunks.
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.
-    buf_pool: DashMap<Pos<DIMS>, Arc<Chunk<T>>>,
+    chunk_bufs: DashMap<Pos<DIMS>, Arc<ChunkBuf<T, DIMS>>>,
+
+    /// The IO handler.
     io_handle: Io,
 
     /// Dimension information of this world.
-    mappings: [SingleDimMapping; DIMS],
+    mappings: Arc<[DimMapping; DIMS]>,
+
     /// Limit of buffered chunks in this world,
     /// if possible to clean.
     ///
@@ -89,24 +215,24 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         const TEMP_RANGE: RangeInclusive<usize> = 0..=0;
         let mut arr = [TEMP_RANGE; DIMS];
 
-        for (index, value1) in arr.iter_mut().enumerate() {
+        for (index, (value1, map)) in arr.iter_mut().zip(self.mappings.iter()).enumerate() {
             if index == dim {
-                if let Ok(v) = self.mappings[index].chunk_of(value) {
+                if let Ok(v) = map.chunk_of(value) {
                     *value1 = v..=v
                 } else {
                     return Select {
                         world: self,
-                        slice: Shape::None,
+                        shape: Shape::None,
                     };
                 }
             } else {
-                *value1 = self.mappings[index].chunk_range()
+                *value1 = map.chunk_range()
             }
         }
 
         Select {
             world: self,
-            slice: Shape::Single(PosBox::new(arr)),
+            shape: Shape::Single(PosBox::new(arr)),
         }
     }
 
@@ -126,7 +252,7 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 } else {
                     return Select {
                         world: self,
-                        slice: Shape::None,
+                        shape: Shape::None,
                     };
                 }
             } else {
@@ -136,13 +262,29 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         Select {
             world: self,
-            slice: Shape::Single(PosBox::new(arr)),
+            shape: Shape::Single(PosBox::new(arr)),
         }
     }
 
     #[inline]
     fn should_clean_buf_pool(&self) -> bool {
-        self.buf_pool.len() > self.chunks_limit && self.chunks_limit != 0
+        self.chunk_bufs.len() > self.chunks_limit && self.chunks_limit != 0
+    }
+
+    /// Get the buffered chunk with given position.
+    #[inline]
+    pub fn chunk_buf_of_pos(&self, pos: Pos<DIMS>) -> Option<Arc<ChunkBuf<T, DIMS>>> {
+        self.chunk_bufs.get(&pos).map(|r| r.clone())
+    }
+
+    /// Validates the given chunk position to dim mappings
+    /// of this world.
+    #[inline]
+    fn pos_in_range(&self, pos: Pos<DIMS>) -> Result<(), super::range::Error> {
+        for (map, val) in self.mappings.iter().zip(pos.into_iter()) {
+            map.in_range(val as u64)?;
+        }
+        Ok(())
     }
 }
 
@@ -165,28 +307,32 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         assert_ne!(DIMS, 0, "there should be at least 1 dimensions");
 
         Self {
-            buf_pool: DashMap::new(),
+            chunk_bufs: DashMap::new(),
             chunks_limit: 24,
-            mappings: dims.map(|value| SingleDimMapping::new(value.range, value.items_per_chunk)),
+            mappings: Arc::new(
+                dims.map(|value| DimMapping::new(value.range, value.items_per_chunk)),
+            ),
             io_handle,
         }
     }
 
     /// Load the chunk of given chunk position, through IO operation.
-    async fn load_chunk(&self, pos: Pos<DIMS>) {
-        if self.buf_pool.contains_key(&pos) {
-            return;
+    /// If the requested chunk does not exist, an empty chunk buffer
+    /// will be created for use.
+    async fn load_chunk_buf(&self, pos: Pos<DIMS>) -> Arc<ChunkBuf<T, DIMS>> {
+        if let Some(val) = self.chunk_bufs.get(&pos) {
+            return val.clone();
         }
 
         // Clean buffer pool if it reaches the limit.
         if self.should_clean_buf_pool() {
-            self.buf_pool
+            self.chunk_bufs
                 .retain(|_, chunk| chunk.writes.load(std::sync::atomic::Ordering::Acquire) > 0);
         }
 
         let selection = Select {
             world: self,
-            slice: Shape::Single(PosBox::new(pos.map(|e| e..=e))),
+            shape: Shape::Single(PosBox::new(pos.map(|e| e..=e))),
         };
 
         let mut stream = selection.iter();
@@ -204,25 +350,74 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         // There are await points before this point, so
         // double-check if the chunk exists.
-        if self.buf_pool.contains_key(&pos) {
-            return;
+        if let Some(val) = self.chunk_bufs.get(&pos) {
+            return val.clone();
         }
 
-        self.buf_pool.insert(
+        let arc = Arc::new(ChunkBuf {
+            data: RwLock::new(items),
+            writes: AtomicUsize::new(0),
+            lock_w: std::sync::Mutex::new(()),
+            mappings: self.mappings.clone(),
             pos,
-            Arc::new(Chunk {
-                data: RwLock::new(items),
-                writes: AtomicU16::new(0),
-                lock_w: async_lock::Mutex::new(()),
-            }),
-        );
+        });
+        self.chunk_bufs.insert(pos, arc.clone());
+        arc
+    }
+
+    /// Get the buffered chunk with given position.
+    /// If the requested chunk buffer does not exist,
+    /// a new chunk buffer will be loaded or created.
+    pub async fn chunk_buf_of_pos_or_load(
+        &self,
+        pos: Pos<DIMS>,
+    ) -> Result<Arc<ChunkBuf<T, DIMS>>, crate::Error> {
+        if let Some(val) = self.chunk_buf_of_pos(pos) {
+            Ok(val)
+        } else {
+            self.pos_in_range(pos)
+                .map_err(crate::Error::PosOutOfBound)?;
+            Ok(self.load_chunk_buf(pos).await)
+        }
+    }
+
+    /// Gets the buffered chunk which the given data should be stored in.
+    #[inline]
+    pub fn chunk_buf_of_data(
+        &self,
+        data: &T,
+    ) -> Result<Option<Arc<ChunkBuf<T, DIMS>>>, crate::Error> {
+        Ok(self.chunk_buf_of_pos(self.chunk_pos_of_data(data)?))
+    }
+
+    /// Gets the buffered chunk which the given data should be stored in.
+    /// If the requested chunk buffer does not exist,
+    /// a new chunk buffer will be loaded or created.
+    #[inline]
+    pub async fn chunk_buf_of_data_or_load(
+        &self,
+        data: &T,
+    ) -> Result<Arc<ChunkBuf<T, DIMS>>, crate::Error> {
+        self.chunk_buf_of_pos_or_load(self.chunk_pos_of_data(data)?)
+            .await
+    }
+
+    /// Gets position of chunk which the given data should be stored in.
+    pub fn chunk_pos_of_data(&self, data: &T) -> Result<Pos<DIMS>, crate::Error> {
+        let mut pos = [0; DIMS];
+        for (i, (val, map)) in pos.iter_mut().zip(self.mappings.iter()).enumerate() {
+            *val = map
+                .chunk_of(data.value_of(i))
+                .map_err(crate::Error::PosOutOfBound)?;
+        }
+        Ok(pos)
     }
 }
 
 /// A selection of chunks.
-pub struct Select<'a, T, const DIMS: usize, Io: IoHandle> {
-    world: &'a World<T, DIMS, Io>,
-    slice: Shape<DIMS>,
+pub struct Select<'w, T, const DIMS: usize, Io: IoHandle> {
+    world: &'w World<T, DIMS, Io>,
+    shape: Shape<DIMS>,
 }
 
 impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
@@ -230,8 +425,8 @@ impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// and intersect with current selection.
     #[inline]
     pub fn range_and(&mut self, dim: usize, range: impl RangeBounds<u64> + Clone) {
-        if let Shape::Single(v) = self.world.range_select(dim, range).slice {
-            self.slice.intersect(v)
+        if let Shape::Single(v) = self.world.range_select(dim, range).shape {
+            self.shape.intersect(v)
         }
     }
 
@@ -239,8 +434,8 @@ impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// and intersect with current selection.
     #[inline]
     pub fn and(&mut self, dim: usize, value: u64) {
-        if let Shape::Single(v) = self.world.select(dim, value).slice {
-            self.slice.intersect(v)
+        if let Shape::Single(v) = self.world.select(dim, value).shape {
+            self.shape.intersect(v)
         }
     }
 
@@ -248,24 +443,20 @@ impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// and combine with current selection.
     #[inline]
     pub fn range_plus(&mut self, dim: usize, range: impl RangeBounds<u64> + Clone) {
-        self.slice += self.world.range_select(dim, range).slice
+        self.shape += self.world.range_select(dim, range).shape
     }
 
     /// Select from a value in the given dimension,
     /// and combine with current selection.
     #[inline]
     pub fn plus(&mut self, dim: usize, value: u64) {
-        self.slice += self.world.select(dim, value).slice
+        self.shape += self.world.select(dim, value).shape
     }
 
-    /// Returns an async iterator (or `Stream`) of this selection
+    /// Returns an async iterator (namely `Stream`) of this selection
     /// that iterate data items.
     #[inline]
     pub fn iter(&self) -> iter::Iter<'_, T, DIMS, Io> {
-        iter::Iter {
-            world: self.world,
-            shape: self.slice.iter(),
-            current: None,
-        }
+        iter::Iter::new(self.world, self.shape.iter())
     }
 }

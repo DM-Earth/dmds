@@ -1,8 +1,11 @@
 mod range;
+
 pub mod world;
 
 use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
+
+pub use range::Error as RangeError;
 
 /// Represents types stored directly in a dimensional world.
 pub trait Data: Sized + Send + Sync + Unpin {
@@ -22,7 +25,7 @@ pub trait Data: Sized + Send + Sync + Unpin {
     ///
     /// Note: You don't need to encode dimensional values.
     /// They will be encoded automatically.
-    fn encode<B: bytes::BufMut>(&self, dims: &[u64], buf: B) -> std::io::Result<()>;
+    fn encode<B: bytes::BufMut>(&self, buf: B) -> std::io::Result<()>;
 }
 
 #[async_trait]
@@ -48,4 +51,10 @@ pub trait WriteFinish: AsyncWrite {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("chunk position out of bound: {0}")]
+    PosOutOfBound(RangeError),
 }

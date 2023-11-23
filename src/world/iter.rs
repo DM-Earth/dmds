@@ -11,7 +11,7 @@ use futures_lite::{ready, AsyncRead, FutureExt, Stream};
 
 use crate::{Data, IoHandle};
 
-use super::{Chunk, ChunkData, Pos, World};
+use super::{ChunkBuf, ChunkData, Pos, World};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -49,7 +49,7 @@ pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
 enum LoadMethod<'w, T, const DIMS: usize> {
     /// Load data from buffer pool in `World`.
     Mem {
-        chunk: Arc<Chunk<T>>,
+        chunk: Arc<ChunkBuf<T, DIMS>>,
         guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
         lock: &'w RwLock<T>,
     },
@@ -65,13 +65,13 @@ enum LazyInner<'w, T, const DIMS: usize> {
 }
 
 struct RefArc<'w, T, const DIMS: usize> {
-    _chunk: Arc<Chunk<T>>,
+    _chunk: Arc<ChunkBuf<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
     guard: Option<RwLockReadGuard<'w, T>>,
 }
 
 struct RefMutArc<'w, T, const DIMS: usize> {
-    _chunk: Arc<Chunk<T>>,
+    _chunk: Arc<ChunkBuf<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
     guard: RwLockWriteGuard<'w, T>,
 }
@@ -214,12 +214,12 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
     }
 
-    /// Load the chunk this data belongs to to the buffer pool,
+    /// Load the chunk buffer this data belongs to to the buffer pool,
     /// and fill this instance's lazy value with target data in chunk.
     async unsafe fn load_chunk(&mut self) -> Result<(), Error> {
-        self.world.load_chunk(self.chunk).await;
+        self.world.load_chunk_buf(self.chunk).await;
 
-        let chunk = self.world.buf_pool.get(&self.chunk).unwrap().clone();
+        let chunk = self.world.chunk_bufs.get(&self.chunk).unwrap().clone();
         // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
         // SAFETY: wrapping lifetime to 'w.
@@ -257,7 +257,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 type IoReadFuture<'a, Io> =
     dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read>> + Send + 'a;
 
-pub(super) enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
+enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Pre {
         world: &'a World<T, DIMS, Io>,
         chunk: [usize; DIMS],
@@ -278,14 +278,14 @@ pub(super) enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
 /// - Dimensions
 /// - Data length in bytes
 /// - Data bytes
-pub(super) enum InProgress<const DIMS: usize> {
+enum InProgress<const DIMS: usize> {
     Dims([U64Buf; DIMS]),
     Len([u8; 4], [u64; DIMS]),
     Data(bytes::BytesMut, [u64; DIMS]),
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum U64Buf {
+enum U64Buf {
     Buf([u8; 8]),
     Num(u64),
 }
@@ -411,11 +411,11 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
     }
 }
 
-pub(super) struct ChunkFromMemIter<'a, T, const DIMS: usize, Io: IoHandle> {
+struct ChunkFromMemIter<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     chunk_pos: [usize; DIMS],
 
-    chunk: Arc<Chunk<T>>,
+    chunk: Arc<ChunkBuf<T, DIMS>>,
     guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
 
     iter: std::slice::Iter<'a, (u64, RwLock<T>)>,
@@ -441,18 +441,19 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
     }
 }
 
-/// An `Iterator` that iterates over a selection.
+/// An async iterator (namely stream) that iterates over a selection
+/// of chunks.
 pub struct Iter<'a, T, const DIMS: usize, Io: IoHandle> {
-    pub(super) world: &'a World<T, DIMS, Io>,
+    world: &'a World<T, DIMS, Io>,
 
-    pub(super) shape: super::select::RawShapeIter<'a, DIMS>,
-    pub(super) current: Option<ChunkIter<'a, T, DIMS, Io>>,
+    shape: super::select::RawShapeIter<'a, DIMS>,
+    current: Option<ChunkIter<'a, T, DIMS, Io>>,
 }
 
-pub(super) enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
+enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
-        map_ref: Arc<Chunk<T>>,
+        map_ref: Arc<ChunkBuf<T, DIMS>>,
         fut: Pin<
             Box<
                 dyn std::future::Future<
@@ -465,6 +466,19 @@ pub(super) enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Mem(ChunkFromMemIter<'a, T, DIMS, Io>),
 }
 
+impl<'a, T, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
+    #[inline]
+    pub(super) const fn new(
+        world: &'a World<T, DIMS, Io>,
+        shape: super::select::RawShapeIter<'a, DIMS>,
+    ) -> Self {
+        Self {
+            world,
+            shape,
+            current: None,
+        }
+    }
+}
 impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
     type Item = Result<Lazy<'a, T, DIMS, Io>, Error>;
 
@@ -502,7 +516,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
         }
 
         if let Some(pos) = this.shape.next() {
-            if let Some(chunk_l) = this.world.buf_pool.get(&pos) {
+            if let Some(chunk_l) = this.world.chunk_bufs.get(&pos) {
                 this.current = Some(ChunkIter::MemReadChunk {
                     // SAFETY: wrapping lifetime
                     fut: unsafe { std::mem::transmute(chunk_l.value().data.read().boxed()) },

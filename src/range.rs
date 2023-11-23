@@ -2,7 +2,7 @@ use std::ops::{RangeBounds, RangeInclusive};
 
 /// Maps single-dimension value to chunks in a certain range.
 #[derive(Debug)]
-pub struct SingleDimMapping {
+pub struct DimMapping {
     range: RangeInclusive<u64>,
     /// Elements per chunk.
     spacing: u64,
@@ -10,7 +10,7 @@ pub struct SingleDimMapping {
     chunks_len: usize,
 }
 
-impl SingleDimMapping {
+impl DimMapping {
     /// Creates a new mapping from given `range` and `elements_per_chunk`.
     ///
     /// # Panics
@@ -36,7 +36,7 @@ impl SingleDimMapping {
     }
 
     /// Gets the chunk position of a value in this mapping.
-    pub fn chunk_of(&self, mut value: u64) -> Result<usize, SingleDimMappingError> {
+    pub fn chunk_of(&self, mut value: u64) -> Result<usize, Error> {
         self.in_range(value)?;
         value -= *self.range.start();
         let pos = (value / self.spacing) as usize;
@@ -45,10 +45,7 @@ impl SingleDimMapping {
     }
 
     /// Gets range of chunks from given range bounds in this mapping.
-    pub fn chunks_of(
-        &self,
-        range: impl RangeBounds<u64>,
-    ) -> Result<RangeInclusive<usize>, SingleDimMappingError> {
+    pub fn chunks_of(&self, range: impl RangeBounds<u64>) -> Result<RangeInclusive<usize>, Error> {
         Ok(match range.start_bound() {
             std::ops::Bound::Included(value) => self.chunk_of(*value)?,
             std::ops::Bound::Excluded(value) => self.chunk_of(*value + 1)?,
@@ -60,12 +57,12 @@ impl SingleDimMapping {
         })
     }
 
-    #[inline(always)]
-    fn in_range(&self, value: u64) -> Result<(), SingleDimMappingError> {
+    #[inline]
+    pub fn in_range(&self, value: u64) -> Result<(), Error> {
         if self.range.contains(&value) {
             Ok(())
         } else {
-            Err(SingleDimMappingError::ValueOutOfRange {
+            Err(Error::ValueOutOfRange {
                 range: (*self.range.start(), *self.range.end()),
                 value,
             })
@@ -79,18 +76,18 @@ impl SingleDimMapping {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SingleDimMappingError {
+pub enum Error {
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]
     ValueOutOfRange { range: (u64, u64), value: u64 },
 }
 
 #[cfg(test)]
 mod single_dim_map_tests {
-    use super::SingleDimMapping;
+    use super::DimMapping;
 
     #[test]
     fn chunk_locating() {
-        let map = SingleDimMapping::new(1..=9, 3);
+        let map = DimMapping::new(1..=9, 3);
 
         assert_eq!(map.chunk_of(1_u64).unwrap(), 0);
         assert_eq!(map.chunk_of(2_u64).unwrap(), 0);
@@ -103,12 +100,12 @@ mod single_dim_map_tests {
     #[test]
     #[should_panic]
     fn invalid_creating() {
-        let _ = SingleDimMapping::new(1..=9, 4);
+        let _ = DimMapping::new(1..=9, 4);
     }
 
     #[test]
     fn chunks_ranging() {
-        let map = SingleDimMapping::new(1..=9, 3);
+        let map = DimMapping::new(1..=9, 3);
 
         assert_eq!(map.chunks_of(2_u64..7_u64).unwrap(), 0..=1);
         assert_eq!(map.chunks_of(2_u64..=7_u64).unwrap(), 0..=2);
