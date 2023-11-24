@@ -74,19 +74,25 @@ pub trait WriteFinish: AsyncWrite {
     ) -> std::task::Poll<std::io::Result<()>>;
 }
 
+/// Represents error variants produced by this crate.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// IO Error.
     #[error("io err: {0}")]
     Io(std::io::Error),
+    /// Requesting value has been taken.
     #[error("requesting value has been taken")]
     ValueTaken,
+    /// Requesting value not found.
     #[error("requesting value not found")]
     ValueNotFound,
-    #[error("requested stream updated.")]
+    /// Requested iterator, or stream, has been updated.
+    #[error("requested stream has been updated.")]
     IterUpdated {
         expected: usize,
         current: Option<usize>,
     },
+    /// Given value out of range.
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]
     ValueOutOfRange { range: (u64, u64), value: u64 },
 }
