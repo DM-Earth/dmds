@@ -1,10 +1,12 @@
+/// Module containing range mappings.
 mod range;
 
 /// Module containing in-memory IO handlers for testing.
 #[cfg(test)]
 pub mod mem_io_handle;
+
 /// Module containing world implementation.
-pub mod world;
+mod world;
 
 /// Module containing tests.
 #[cfg(test)]
@@ -13,18 +15,18 @@ mod tests;
 use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
-pub use range::Error as RangeError;
+pub use world::{iter::Iter, iter::Lazy, Chunk, Select, World};
 
 /// Represents types stored directly in a dimensional world.
 pub trait Data: Sized + Send + Sync + Unpin {
     /// Count of dimensions.
     const DIMS: usize;
 
-    /// Gets the value of given dimension.
+    /// Gets the value of required dimension.
     ///
     /// Dimension index starts from 0, which should be
     /// a unique data such as the only id.
-    fn value_of(&self, dim: usize) -> u64;
+    fn dim(&self, dim: usize) -> u64;
 
     /// Decode this type from given `Read` and dimensional values.
     fn decode<B: bytes::Buf>(dims: &[u64], buf: B) -> std::io::Result<Self>;
@@ -74,8 +76,6 @@ pub trait WriteFinish: AsyncWrite {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("chunk position out of bound: {0}")]
-    PosOutOfBound(RangeError),
     #[error("io err: {0}")]
     Io(std::io::Error),
     #[error("requesting value has been taken")]
@@ -87,4 +87,6 @@ pub enum Error {
         expected: usize,
         current: Option<usize>,
     },
+    #[error("value {value} out of range [{}, {}]", range.0, range.1)]
+    ValueOutOfRange { range: (u64, u64), value: u64 },
 }

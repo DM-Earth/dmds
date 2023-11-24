@@ -23,7 +23,7 @@ use self::select::{PosBox, Shape};
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 type ChunkData<T> = Vec<(u64, RwLock<T>)>;
 
-/// A buffered chunk.
+/// A buffered chunk storing data in memory.
 ///
 /// # Data layout
 ///
@@ -41,7 +41,7 @@ type ChunkData<T> = Vec<(u64, RwLock<T>)>;
 /// └───────────────────────┴───────────────────────┴───────────────────────┴──────────────────────────────┴──────┘
 /// ```
 #[derive(Debug)]
-pub struct ChunkBuf<T, const DIMS: usize> {
+pub struct Chunk<T, const DIMS: usize> {
     /// The inner data of this chunk.
     data: RwLock<ChunkData<T>>,
 
@@ -56,7 +56,7 @@ pub struct ChunkBuf<T, const DIMS: usize> {
     pos: Pos<DIMS>,
 }
 
-impl<T, const DIMS: usize> ChunkBuf<T, DIMS> {
+impl<T, const DIMS: usize> Chunk<T, DIMS> {
     /// Gets the position of this chunk.
     #[inline]
     pub fn pos(&self) -> &Pos<DIMS> {
@@ -70,7 +70,7 @@ impl<T, const DIMS: usize> ChunkBuf<T, DIMS> {
     }
 }
 
-impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
+impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
     /// Write this chunk to the given buffer, as bytes.
     ///
     /// After writing to the bytes buffer successfully,
@@ -86,10 +86,10 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
         let datas_read = self.data.read().await;
         for data in datas_read.iter() {
             let data_read = data.1.read().await;
-            debug_assert_eq!(data.0, data_read.value_of(0), "data id should be immutable");
+            debug_assert_eq!(data.0, data_read.dim(0), "data id should be immutable");
             buf.put_u64(data.0);
             for dim_i in 1..T::DIMS {
-                buf.put_u64(data_read.value_of(dim_i));
+                buf.put_u64(data_read.dim(dim_i));
             }
 
             let mut bytes = BytesMut::new();
@@ -113,7 +113,7 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
     pub async fn insert(&self, data: T) -> Option<T> {
         let mut vals = [0; DIMS];
         for (i, val) in vals.iter_mut().enumerate() {
-            *val = data.value_of(i);
+            *val = data.dim(i);
         }
 
         assert!(self.vals_in_range(vals), "given data is invalid to this chunk. data dimension values: {vals:?}, chunk position: {:?}", self.pos);
@@ -141,7 +141,7 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
     pub async fn try_insert(&self, data: T) -> Result<(), T> {
         let mut vals = [0; DIMS];
         for (i, val) in vals.iter_mut().enumerate() {
-            *val = data.value_of(i);
+            *val = data.dim(i);
         }
 
         if !self.vals_in_range(vals) {
@@ -187,12 +187,11 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
     }
 }
 
-/// A world represent bunch of single type of
-/// data stored in multi-dimensional chunks.
+/// A world containing chunks, in multi-dimensions.
 #[derive(Debug)]
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.
-    chunk_bufs: DashMap<Pos<DIMS>, Arc<ChunkBuf<T, DIMS>>>,
+    chunk_bufs: DashMap<Pos<DIMS>, Arc<Chunk<T, DIMS>>>,
 
     /// The IO handler.
     io_handle: Io,
@@ -287,14 +286,14 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
     /// Get the buffered chunk with given position.
     #[inline]
-    pub fn chunk_buf_of_pos(&self, pos: Pos<DIMS>) -> Option<Arc<ChunkBuf<T, DIMS>>> {
+    pub fn chunk_buf_of_pos(&self, pos: Pos<DIMS>) -> Option<Arc<Chunk<T, DIMS>>> {
         self.chunk_bufs.get(&pos).map(|r| r.clone())
     }
 
     /// Validates the given chunk position to dim mappings
     /// of this world.
     #[inline]
-    fn pos_in_range(&self, pos: Pos<DIMS>) -> Result<(), super::range::Error> {
+    fn pos_in_range(&self, pos: Pos<DIMS>) -> Result<(), crate::Error> {
         for (map, val) in self.mappings.iter().zip(pos.into_iter()) {
             map.in_range(val as u64)?;
         }
@@ -334,7 +333,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     ///
     /// If the requested chunk does not exist, an empty chunk buffer
     /// will be created for use.
-    async fn load_chunk_buf(&self, pos: Pos<DIMS>) -> Arc<ChunkBuf<T, DIMS>> {
+    async fn load_chunk_buf(&self, pos: Pos<DIMS>) -> Arc<Chunk<T, DIMS>> {
         if let Some(val) = self.chunk_bufs.get(&pos) {
             return val.clone();
         }
@@ -369,7 +368,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             return val.clone();
         }
 
-        let arc = Arc::new(ChunkBuf {
+        let arc = Arc::new(Chunk {
             data: RwLock::new(items),
             writes: AtomicUsize::new(0),
             lock_w: std::sync::Mutex::new(()),
@@ -386,22 +385,18 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     pub async fn chunk_buf_of_pos_or_load(
         &self,
         pos: Pos<DIMS>,
-    ) -> Result<Arc<ChunkBuf<T, DIMS>>, crate::Error> {
+    ) -> Result<Arc<Chunk<T, DIMS>>, crate::Error> {
         if let Some(val) = self.chunk_buf_of_pos(pos) {
             Ok(val)
         } else {
-            self.pos_in_range(pos)
-                .map_err(crate::Error::PosOutOfBound)?;
+            self.pos_in_range(pos)?;
             Ok(self.load_chunk_buf(pos).await)
         }
     }
 
     /// Gets the buffered chunk which the given data should be stored in.
     #[inline]
-    pub fn chunk_buf_of_data(
-        &self,
-        data: &T,
-    ) -> Result<Option<Arc<ChunkBuf<T, DIMS>>>, crate::Error> {
+    pub fn chunk_buf_of_data(&self, data: &T) -> Result<Option<Arc<Chunk<T, DIMS>>>, crate::Error> {
         Ok(self.chunk_buf_of_pos(self.chunk_pos_of_data(data)?))
     }
 
@@ -412,7 +407,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     pub async fn chunk_buf_of_data_or_load(
         &self,
         data: &T,
-    ) -> Result<Arc<ChunkBuf<T, DIMS>>, crate::Error> {
+    ) -> Result<Arc<Chunk<T, DIMS>>, crate::Error> {
         self.chunk_buf_of_pos_or_load(self.chunk_pos_of_data(data)?)
             .await
     }
@@ -421,9 +416,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     pub fn chunk_pos_of_data(&self, data: &T) -> Result<Pos<DIMS>, crate::Error> {
         let mut pos = [0; DIMS];
         for (i, (val, map)) in pos.iter_mut().zip(self.mappings.iter()).enumerate() {
-            *val = map
-                .chunk_of(data.value_of(i))
-                .map_err(crate::Error::PosOutOfBound)?;
+            *val = map.chunk_of(data.dim(i))?;
         }
         Ok(pos)
     }

@@ -11,13 +11,13 @@ use futures_lite::{ready, AsyncRead, FutureExt, Stream};
 
 use crate::{Data, IoHandle};
 
-use super::{ChunkBuf, ChunkData, Pos, World};
+use super::{Chunk, ChunkData, Pos, World};
 
-/// A type load data lazily.
+/// A cell loads data in world lazily.
 #[derive(Debug)]
 pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
     world: &'w World<T, DIMS, Io>,
-    /// Pre-loaded identifier of this data.
+    /// Pre-initialized identifier of this data.
     id: u64,
 
     /// Lazy-loaded dimensions of this data.
@@ -36,7 +36,7 @@ pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
 enum LoadMethod<'w, T, const DIMS: usize> {
     /// Load data from buffer pool in `World`.
     Mem {
-        chunk: Arc<ChunkBuf<T, DIMS>>,
+        chunk: Arc<Chunk<T, DIMS>>,
         guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
         lock: &'w RwLock<T>,
     },
@@ -54,19 +54,20 @@ enum LazyInner<'w, T, const DIMS: usize> {
 
 #[derive(Debug)]
 struct RefArc<'w, T, const DIMS: usize> {
-    _chunk: Arc<ChunkBuf<T, DIMS>>,
+    _chunk: Arc<Chunk<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
     guard: Option<RwLockReadGuard<'w, T>>,
 }
 
 #[derive(Debug)]
 struct RefMutArc<'w, T, const DIMS: usize> {
-    _chunk: Arc<ChunkBuf<T, DIMS>>,
+    _chunk: Arc<Chunk<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
     guard: RwLockWriteGuard<'w, T>,
 }
 
 impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
+    /// Gets the value of dimension `0` of this data.
     #[inline]
     pub fn id(&self) -> u64 {
         self.id
@@ -92,7 +93,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
         for (index, dim) in dims.iter_mut().enumerate() {
             if index != 0 {
-                *dim = val.value_of(index);
+                *dim = val.dim(index);
             }
         }
 
@@ -212,7 +213,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     /// be loaded into buffer pool.
     pub async fn burn(self) -> Result<(), crate::Error> {
         let this = self.get().await?;
-        let id = this.value_of(0);
+        let id = this.dim(0);
         let chunk = self.world.chunk_buf_of_data_or_load(this).await?;
         chunk.remove(id).await;
 
@@ -221,7 +222,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Load the chunk buffer this data belongs to to the buffer pool,
     /// and fill this instance's lazy value with target data in chunk.
-    async unsafe fn load_chunk(&mut self) -> Result<Arc<ChunkBuf<T, DIMS>>, crate::Error> {
+    async unsafe fn load_chunk(&mut self) -> Result<Arc<Chunk<T, DIMS>>, crate::Error> {
         let chunk = self.world.load_chunk_buf(self.chunk).await;
         // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
@@ -423,7 +424,7 @@ struct ChunkFromMemIter<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     chunk_pos: [usize; DIMS],
 
-    chunk: Arc<ChunkBuf<T, DIMS>>,
+    chunk: Arc<Chunk<T, DIMS>>,
     guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
 
     iter: std::slice::Iter<'a, (u64, RwLock<T>)>,
@@ -464,7 +465,7 @@ type ReadLockFut<'a, T> =
 enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
-        map_ref: Arc<ChunkBuf<T, DIMS>>,
+        map_ref: Arc<Chunk<T, DIMS>>,
         fut: Pin<Box<ReadLockFut<'a, T>>>,
         pos: [usize; DIMS],
     },
