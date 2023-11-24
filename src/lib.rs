@@ -76,4 +76,15 @@ pub trait WriteFinish: AsyncWrite {
 pub enum Error {
     #[error("chunk position out of bound: {0}")]
     PosOutOfBound(RangeError),
+    #[error("io err: {0}")]
+    Io(std::io::Error),
+    #[error("requesting value has been taken")]
+    ValueTaken,
+    #[error("requesting value not found")]
+    ValueNotFound,
+    #[error("requested stream updated.")]
+    IterUpdated {
+        expected: usize,
+        current: Option<usize>,
+    },
 }

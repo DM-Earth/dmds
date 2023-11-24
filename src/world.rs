@@ -330,7 +330,8 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         }
     }
 
-    /// Load the chunk of given chunk position, through IO operation.
+    /// Gets the chunk buffer of given chunk position, through IO if not exist.
+    ///
     /// If the requested chunk does not exist, an empty chunk buffer
     /// will be created for use.
     async fn load_chunk_buf(&self, pos: Pos<DIMS>) -> Arc<ChunkBuf<T, DIMS>> {

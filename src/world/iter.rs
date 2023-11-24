@@ -13,21 +13,6 @@ use crate::{Data, IoHandle};
 
 use super::{ChunkBuf, ChunkData, Pos, World};
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("io err: {0}")]
-    Io(std::io::Error),
-    #[error("requiring value has been taken")]
-    ValueTaken,
-    #[error("requiring value not found")]
-    ValueNotFound,
-    #[error("depending stream updated.")]
-    IterUpdated {
-        expected: usize,
-        current: Option<usize>,
-    },
-}
-
 /// A type load data lazily.
 #[derive(Debug)]
 pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
@@ -96,7 +81,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 
     /// Gets info of dimensions of the value.
-    pub async fn dims(&self) -> Result<&[u64; DIMS], Error> {
+    pub async fn dims(&self) -> Result<&[u64; DIMS], crate::Error> {
         if let Some(dims) = self.dims.get() {
             return Ok(dims);
         }
@@ -116,9 +101,9 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Gets the inner value immutably or initialize it
     /// if it's uninitialized.
-    pub async fn get(&self) -> Result<&T, Error> {
+    pub async fn get(&self) -> Result<&T, crate::Error> {
         match self.value.get() {
-            Some(LazyInner::Ref(val)) => val.guard.as_deref().ok_or(Error::ValueNotFound),
+            Some(LazyInner::Ref(val)) => val.guard.as_deref().ok_or(crate::Error::ValueNotFound),
             Some(LazyInner::RefMut(val)) => Ok(&val.guard),
             Some(LazyInner::Direct(val)) => Ok(val),
             None => self.init().await,
@@ -126,7 +111,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 
     /// Initialize the inner value immutably.
-    pub(super) async fn init(&self) -> Result<&T, Error> {
+    pub(super) async fn init(&self) -> Result<&T, crate::Error> {
         match self.method {
             LoadMethod::Mem {
                 ref chunk,
@@ -151,7 +136,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
             }
             LoadMethod::Io(ref bytes) => {
                 let _ = self.value.set(LazyInner::Direct(
-                    T::decode(self.dims.get().unwrap(), bytes.clone()).map_err(Error::Io)?,
+                    T::decode(self.dims.get().unwrap(), bytes.clone()).map_err(crate::Error::Io)?,
                 ));
 
                 if let Some(LazyInner::Direct(val)) = self.value.get() {
@@ -165,7 +150,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Gets the inner value mutably or initialize it
     /// if it's uninitialized.
-    pub async fn get_mut(&mut self) -> Result<&mut T, Error> {
+    pub async fn get_mut(&mut self) -> Result<&mut T, crate::Error> {
         if let Some(LazyInner::RefMut(val)) = self
             .value
             .get_mut()
@@ -181,7 +166,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 
     /// Initialize the inner value mutably.
-    pub(super) async fn init_mut(&mut self) -> Result<&mut T, Error> {
+    pub(super) async fn init_mut(&mut self) -> Result<&mut T, crate::Error> {
         match self.method {
             LoadMethod::Mem {
                 ref chunk,
@@ -221,9 +206,22 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
     }
 
+    /// Remove this data from the chunk buffer.
+    ///
+    /// If the chunk buffer does not exist, the chunk will
+    /// be loaded into buffer pool.
+    pub async fn burn(self) -> Result<(), crate::Error> {
+        let this = self.get().await?;
+        let id = this.value_of(0);
+        let chunk = self.world.chunk_buf_of_data_or_load(this).await?;
+        chunk.remove(id).await;
+
+        Ok(())
+    }
+
     /// Load the chunk buffer this data belongs to to the buffer pool,
     /// and fill this instance's lazy value with target data in chunk.
-    async unsafe fn load_chunk(&mut self) -> Result<Arc<ChunkBuf<T, DIMS>>, Error> {
+    async unsafe fn load_chunk(&mut self) -> Result<Arc<ChunkBuf<T, DIMS>>, crate::Error> {
         let chunk = self.world.load_chunk_buf(self.chunk).await;
         // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
@@ -232,7 +230,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         let lock = &*(&guard
             .iter()
             .find(|e| e.0 == self.id)
-            .ok_or(Error::ValueNotFound)?
+            .ok_or(crate::Error::ValueNotFound)?
             .1 as *const RwLock<T>);
 
         if let Some(LazyInner::Ref(val)) = self.value.get_mut() {
@@ -488,7 +486,7 @@ impl<'a, T, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
 }
 
 impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
-    type Item = Result<Lazy<'a, T, DIMS, Io>, Error>;
+    type Item = Result<Lazy<'a, T, DIMS, Io>, crate::Error>;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
@@ -498,7 +496,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
         match this.current {
             Some(ChunkIter::Io(ref mut iter)) => {
                 if let Some(val) = ready!(Pin::new(iter).poll_next(cx)) {
-                    return Poll::Ready(Some(val.map_err(Error::Io)));
+                    return Poll::Ready(Some(val.map_err(crate::Error::Io)));
                 }
             }
             Some(ChunkIter::Mem(ref mut iter)) => {
