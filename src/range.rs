@@ -75,6 +75,7 @@ impl DimMapping {
     }
 }
 
+/// Error type for `DimMapping`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]

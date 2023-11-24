@@ -57,8 +57,16 @@ pub struct ChunkBuf<T, const DIMS: usize> {
 }
 
 impl<T, const DIMS: usize> ChunkBuf<T, DIMS> {
+    /// Gets the position of this chunk.
+    #[inline]
     pub fn pos(&self) -> &Pos<DIMS> {
         &self.pos
+    }
+
+    /// Gets the count of writes to this chunk buffer.
+    #[inline]
+    pub fn writes(&self) -> usize {
+        self.writes.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -66,7 +74,7 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
     /// Write this chunk to the given buffer, as bytes.
     ///
     /// After writing to the bytes buffer successfully,
-    /// the writes count will be reseted. See [`Self::writes`].
+    /// the writes count will be reset. See [`Self::writes`].
     ///
     /// For the data layout, see [`World`].
     pub async fn write_buf<B: BufMut>(&self, mut buf: B) -> std::io::Result<()> {
@@ -104,8 +112,8 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
     /// is invalid for this chunk.
     pub async fn insert(&self, data: T) -> Option<T> {
         let mut vals = [0; DIMS];
-        for i in 0..DIMS {
-            vals[i] = data.value_of(i);
+        for (i, val) in vals.iter_mut().enumerate() {
+            *val = data.value_of(i);
         }
 
         assert!(self.vals_in_range(vals), "given data is invalid to this chunk. data dimension values: {vals:?}, chunk position: {:?}", self.pos);
@@ -132,8 +140,8 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
     /// in `Err` variant in `Result`.
     pub async fn try_insert(&self, data: T) -> Result<(), T> {
         let mut vals = [0; DIMS];
-        for i in 0..DIMS {
-            vals[i] = data.value_of(i);
+        for (i, val) in vals.iter_mut().enumerate() {
+            *val = data.value_of(i);
         }
 
         if !self.vals_in_range(vals) {
@@ -142,18 +150,12 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
 
         let mut w = self.data.write().await;
 
-        if let Some(_) = w.iter_mut().find(|v| v.0 == vals[0]) {
+        if w.iter_mut().any(|v| v.0 == vals[0]) {
             Err(data)
         } else {
             w.push((vals[0], RwLock::new(data)));
             Ok(())
         }
-    }
-
-    /// Gets the count of writes to this chunk buffer.
-    #[inline]
-    pub fn writes(&self) -> usize {
-        self.writes.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Validates the given chunk position to dim mappings
@@ -172,10 +174,22 @@ impl<T: Data, const DIMS: usize> ChunkBuf<T, DIMS> {
         }
         true
     }
+
+    /// Remove the data with given id from this chunk buffer.
+    pub async fn remove(&self, id: u64) -> Option<T> {
+        let mut w = self.data.write().await;
+        if let Some(index) = w.iter().position(|v| v.0 == id) {
+            let (_, d) = w.remove(index);
+            Some(d.into_inner())
+        } else {
+            None
+        }
+    }
 }
 
 /// A world represent bunch of single type of
 /// data stored in multi-dimensional chunks.
+#[derive(Debug)]
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.
     chunk_bufs: DashMap<Pos<DIMS>, Arc<ChunkBuf<T, DIMS>>>,

@@ -1,6 +1,14 @@
 mod range;
 
+/// Module containing in-memory IO handlers for testing.
+#[cfg(test)]
+pub mod mem_io_handle;
+/// Module containing world implementation.
 pub mod world;
+
+/// Module containing tests.
+#[cfg(test)]
+mod tests;
 
 use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
@@ -28,25 +36,36 @@ pub trait Data: Sized + Send + Sync + Unpin {
     fn encode<B: bytes::BufMut>(&self, buf: B) -> std::io::Result<()>;
 }
 
+/// Trait representing IO handlers for dimensional worlds.
 #[async_trait]
 pub trait IoHandle: Send + Sync {
-    type Read: AsyncRead + Unpin + Send + Sync;
-    type Write: WriteFinish + Unpin + Send + Sync;
+    /// Type of reader.
+    type Read<'a>: AsyncRead + Unpin + Send + Sync + 'a
+    where
+        Self: 'a;
 
+    /// Type of writer.
+    type Write<'a>: WriteFinish + Unpin + Send + Sync + 'a
+    where
+        Self: 'a;
+
+    /// Gets reader for given chunk position.
     async fn read_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Read>;
+    ) -> std::io::Result<Self::Read<'_>>;
 
+    /// Gets writer for given chunk position.
     async fn write_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Write>;
+    ) -> std::io::Result<Self::Write<'_>>;
 }
 
 /// Trait representing IO types that perform
 /// some async actions after all bytes are wrote.
 pub trait WriteFinish: AsyncWrite {
+    /// Polls the async action.
     fn poll_finish(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

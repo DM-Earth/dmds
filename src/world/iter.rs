@@ -29,6 +29,7 @@ pub enum Error {
 }
 
 /// A type load data lazily.
+#[derive(Debug)]
 pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
     world: &'w World<T, DIMS, Io>,
     /// Pre-loaded identifier of this data.
@@ -46,6 +47,7 @@ pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
 }
 
 /// Method of loading data.
+#[derive(Debug)]
 enum LoadMethod<'w, T, const DIMS: usize> {
     /// Load data from buffer pool in `World`.
     Mem {
@@ -58,18 +60,21 @@ enum LoadMethod<'w, T, const DIMS: usize> {
     Io(bytes::Bytes),
 }
 
+#[derive(Debug)]
 enum LazyInner<'w, T, const DIMS: usize> {
     Ref(RefArc<'w, T, DIMS>),
     RefMut(RefMutArc<'w, T, DIMS>),
     Direct(T),
 }
 
+#[derive(Debug)]
 struct RefArc<'w, T, const DIMS: usize> {
     _chunk: Arc<ChunkBuf<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
     guard: Option<RwLockReadGuard<'w, T>>,
 }
 
+#[derive(Debug)]
 struct RefMutArc<'w, T, const DIMS: usize> {
     _chunk: Arc<ChunkBuf<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
@@ -204,7 +209,9 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
                 }
                 chunk.writes.fetch_add(1, atomic::Ordering::AcqRel);
             }
-            LoadMethod::Io(_) => unsafe { self.load_chunk() }.await?,
+            LoadMethod::Io(_) => unsafe {
+                self.load_chunk().await?;
+            },
         }
 
         if let Some(LazyInner::RefMut(val)) = self.value.get_mut() {
@@ -216,10 +223,8 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Load the chunk buffer this data belongs to to the buffer pool,
     /// and fill this instance's lazy value with target data in chunk.
-    async unsafe fn load_chunk(&mut self) -> Result<(), Error> {
-        self.world.load_chunk_buf(self.chunk).await;
-
-        let chunk = self.world.chunk_bufs.get(&self.chunk).unwrap().clone();
+    async unsafe fn load_chunk(&mut self) -> Result<Arc<ChunkBuf<T, DIMS>>, Error> {
+        let chunk = self.world.load_chunk_buf(self.chunk).await;
         // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
         // SAFETY: wrapping lifetime to 'w.
@@ -249,13 +254,18 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
             *dst = val
         }
 
-        self.method = LoadMethod::Mem { lock, guard, chunk };
-        Ok(())
+        self.method = LoadMethod::Mem {
+            lock,
+            guard,
+            chunk: chunk.clone(),
+        };
+        Ok(chunk)
     }
 }
 
-type IoReadFuture<'a, Io> =
-    dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read>> + Send + 'a;
+type IoReadFuture<'a, Io> = dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read<'a>>>
+    + Send
+    + 'a;
 
 enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Pre {
@@ -266,7 +276,7 @@ enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
     InProgress {
         world: &'a World<T, DIMS, Io>,
         chunk: [usize; DIMS],
-        read: Io::Read,
+        read: Io::Read<'a>,
         progress: InProgress<DIMS>,
     },
 }
@@ -450,17 +460,14 @@ pub struct Iter<'a, T, const DIMS: usize, Io: IoHandle> {
     current: Option<ChunkIter<'a, T, DIMS, Io>>,
 }
 
+type ReadLockFut<'a, T> =
+    dyn std::future::Future<Output = async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>> + 'a;
+
 enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
     MemReadChunk {
         map_ref: Arc<ChunkBuf<T, DIMS>>,
-        fut: Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>,
-                    > + 'a,
-            >,
-        >,
+        fut: Pin<Box<ReadLockFut<'a, T>>>,
         pos: [usize; DIMS],
     },
     Mem(ChunkFromMemIter<'a, T, DIMS, Io>),
@@ -479,6 +486,7 @@ impl<'a, T, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
         }
     }
 }
+
 impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
     type Item = Result<Lazy<'a, T, DIMS, Io>, Error>;
 
