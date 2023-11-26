@@ -36,7 +36,7 @@ impl DimMapping {
     }
 
     /// Gets the chunk position of a value in this mapping.
-    pub fn chunk_of(&self, mut value: u64) -> Result<usize, crate::Error> {
+    pub fn chunk_of(&self, mut value: u64) -> crate::Result<usize> {
         self.in_range(value)?;
         value -= *self.range.start();
         let pos = (value / self.spacing) as usize;
@@ -45,10 +45,7 @@ impl DimMapping {
     }
 
     /// Gets range of chunks from given range bounds in this mapping.
-    pub fn chunks_of(
-        &self,
-        range: impl RangeBounds<u64>,
-    ) -> Result<RangeInclusive<usize>, crate::Error> {
+    pub fn chunks_of(&self, range: impl RangeBounds<u64>) -> crate::Result<RangeInclusive<usize>> {
         Ok(match range.start_bound() {
             std::ops::Bound::Included(value) => self.chunk_of(*value)?,
             std::ops::Bound::Excluded(value) => self.chunk_of(*value + 1)?,
@@ -61,7 +58,7 @@ impl DimMapping {
     }
 
     #[inline]
-    pub fn in_range(&self, value: u64) -> Result<(), crate::Error> {
+    pub fn in_range(&self, value: u64) -> crate::Result<()> {
         if self.range.contains(&value) {
             Ok(())
         } else {

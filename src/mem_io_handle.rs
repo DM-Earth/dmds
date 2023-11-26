@@ -8,9 +8,16 @@ use crate::{IoHandle, WriteFinish};
 /// A simple in-memory storage implementing [`IoHandle`].
 ///
 /// This is only for testing.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct MemStorage {
     chunks: async_lock::RwLock<HashMap<String, Vec<u8>>>,
+}
+
+impl MemStorage {
+    #[inline]
+    pub fn new() -> Self {
+        Default::default()
+    }
 }
 
 #[async_trait]
@@ -30,8 +37,16 @@ impl IoHandle for MemStorage {
         }
         chunk.pop();
 
+        let read = self.chunks.read().await;
+        if !read.contains_key(&chunk) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "chunk not found",
+            ));
+        }
+
         Ok(Reader {
-            chunks: self.chunks.read().await,
+            chunks: read,
             chunk,
         })
     }
@@ -47,8 +62,13 @@ impl IoHandle for MemStorage {
         }
         chunk.pop();
 
+        let mut write = self.chunks.write().await;
+        if !write.contains_key(&chunk) {
+            write.insert(chunk.to_owned(), vec![]);
+        }
+
         Ok(Writer {
-            chunks: self.chunks.write().await,
+            chunks: write,
             chunk,
         })
     }

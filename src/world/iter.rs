@@ -82,7 +82,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 
     /// Gets info of dimensions of the value.
-    pub async fn dims(&self) -> Result<&[u64; DIMS], crate::Error> {
+    pub async fn dims(&self) -> crate::Result<&[u64; DIMS]> {
         if let Some(dims) = self.dims.get() {
             return Ok(dims);
         }
@@ -102,7 +102,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Gets the inner value immutably or initialize it
     /// if it's uninitialized.
-    pub async fn get(&self) -> Result<&T, crate::Error> {
+    pub async fn get(&self) -> crate::Result<&T> {
         match self.value.get() {
             Some(LazyInner::Ref(val)) => val.guard.as_deref().ok_or(crate::Error::ValueNotFound),
             Some(LazyInner::RefMut(val)) => Ok(&val.guard),
@@ -112,7 +112,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 
     /// Initialize the inner value immutably.
-    pub(super) async fn init(&self) -> Result<&T, crate::Error> {
+    pub(super) async fn init(&self) -> crate::Result<&T> {
         match self.method {
             LoadMethod::Mem {
                 ref chunk,
@@ -151,7 +151,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Gets the inner value mutably or initialize it
     /// if it's uninitialized.
-    pub async fn get_mut(&mut self) -> Result<&mut T, crate::Error> {
+    pub async fn get_mut(&mut self) -> crate::Result<&mut T> {
         if let Some(LazyInner::RefMut(val)) = self
             .value
             .get_mut()
@@ -167,7 +167,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 
     /// Initialize the inner value mutably.
-    pub(super) async fn init_mut(&mut self) -> Result<&mut T, crate::Error> {
+    pub(super) async fn init_mut(&mut self) -> crate::Result<&mut T> {
         match self.method {
             LoadMethod::Mem {
                 ref chunk,
@@ -211,7 +211,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     ///
     /// If the chunk buffer does not exist, the chunk will
     /// be loaded into buffer pool.
-    pub async fn burn(self) -> Result<(), crate::Error> {
+    pub async fn burn(self) -> crate::Result<()> {
         let this = self.get().await?;
         let id = this.dim(0);
         let chunk = self.world.chunk_buf_of_data_or_load(this).await?;
@@ -222,7 +222,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Load the chunk buffer this data belongs to to the buffer pool,
     /// and fill this instance's lazy value with target data in chunk.
-    async unsafe fn load_chunk(&mut self) -> Result<Arc<Chunk<T, DIMS>>, crate::Error> {
+    async unsafe fn load_chunk(&mut self) -> crate::Result<Arc<Chunk<T, DIMS>>> {
         let chunk = self.world.load_chunk_buf(self.chunk).await;
         // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
@@ -487,7 +487,7 @@ impl<'a, T, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
 }
 
 impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
-    type Item = Result<Lazy<'a, T, DIMS, Io>, crate::Error>;
+    type Item = crate::Result<Lazy<'a, T, DIMS, Io>>;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
@@ -523,7 +523,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
         }
 
         if let Some(pos) = this.shape.next() {
-            if let Some(chunk_l) = this.world.chunk_bufs.get(&pos) {
+            if let Some(chunk_l) = this.world.chunks_buf.get(&pos) {
                 this.current = Some(ChunkIter::MemReadChunk {
                     // SAFETY: wrapping lifetime
                     fut: unsafe { std::mem::transmute(chunk_l.value().data.read().boxed()) },

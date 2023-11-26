@@ -12,6 +12,8 @@ mod world;
 #[cfg(test)]
 mod tests;
 
+use std::ops::Deref;
+
 use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
@@ -38,6 +40,28 @@ pub trait Data: Sized + Send + Sync + Unpin {
     fn encode<B: bytes::BufMut>(&self, buf: B) -> std::io::Result<()>;
 }
 
+impl<const DIMS: usize> Data for [u64; DIMS] {
+    const DIMS: usize = DIMS;
+
+    #[inline]
+    fn dim(&self, dim: usize) -> u64 {
+        self[dim]
+    }
+
+    fn decode<B: bytes::Buf>(dims: &[u64], _buf: B) -> std::io::Result<Self> {
+        let mut this = [0; DIMS];
+        for (t, d) in this.iter_mut().zip(dims.iter()) {
+            *t = *d
+        }
+        Ok(this)
+    }
+
+    #[inline]
+    fn encode<B: bytes::BufMut>(&self, _buf: B) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Trait representing IO handlers for dimensional worlds.
 #[async_trait]
 pub trait IoHandle: Send + Sync {
@@ -62,6 +86,32 @@ pub trait IoHandle: Send + Sync {
         &self,
         pos: [usize; DIMS],
     ) -> std::io::Result<Self::Write<'_>>;
+}
+
+#[async_trait]
+impl<P, T> IoHandle for P
+where
+    T: IoHandle + 'static,
+    P: Deref<Target = T> + Send + Sync,
+{
+    type Read<'a> = T::Read<'a> where Self: 'a;
+    type Write<'a> = T::Write<'a> where Self: 'a;
+
+    #[inline]
+    async fn read_chunk<const DIMS: usize>(
+        &self,
+        pos: [usize; DIMS],
+    ) -> std::io::Result<Self::Read<'_>> {
+        self.deref().read_chunk(pos).await
+    }
+
+    #[inline]
+    async fn write_chunk<const DIMS: usize>(
+        &self,
+        pos: [usize; DIMS],
+    ) -> std::io::Result<Self::Write<'_>> {
+        self.deref().write_chunk(pos).await
+    }
 }
 
 /// Trait representing IO types that perform
@@ -96,3 +146,5 @@ pub enum Error {
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]
     ValueOutOfRange { range: (u64, u64), value: u64 },
 }
+
+type Result<T> = std::result::Result<T, Error>;

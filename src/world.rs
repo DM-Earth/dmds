@@ -43,7 +43,7 @@ type ChunkData<T> = Vec<(u64, RwLock<T>)>;
 #[derive(Debug)]
 pub struct Chunk<T, const DIMS: usize> {
     /// The inner data of this chunk.
-    data: RwLock<ChunkData<T>>,
+    pub(crate) data: RwLock<ChunkData<T>>,
 
     /// Indicates whether this chunk has been updated.
     writes: AtomicUsize,
@@ -67,6 +67,19 @@ impl<T, const DIMS: usize> Chunk<T, DIMS> {
     #[inline]
     pub fn writes(&self) -> usize {
         self.writes.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Remove the data with given id from this chunk buffer.
+    ///
+    /// Returns the removed data if it exists.
+    pub async fn remove(&self, id: u64) -> Option<T> {
+        let mut w = self.data.write().await;
+        if let Some(index) = w.iter().position(|v| v.0 == id) {
+            let (_, d) = w.remove(index);
+            Some(d.into_inner())
+        } else {
+            None
+        }
     }
 }
 
@@ -174,24 +187,13 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         }
         true
     }
-
-    /// Remove the data with given id from this chunk buffer.
-    pub async fn remove(&self, id: u64) -> Option<T> {
-        let mut w = self.data.write().await;
-        if let Some(index) = w.iter().position(|v| v.0 == id) {
-            let (_, d) = w.remove(index);
-            Some(d.into_inner())
-        } else {
-            None
-        }
-    }
 }
 
 /// A world containing chunks, in multi-dimensions.
 #[derive(Debug)]
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.
-    chunk_bufs: DashMap<Pos<DIMS>, Arc<Chunk<T, DIMS>>>,
+    pub(crate) chunks_buf: DashMap<Pos<DIMS>, Arc<Chunk<T, DIMS>>>,
 
     /// The IO handler.
     io_handle: Io,
@@ -281,19 +283,19 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
     #[inline]
     fn should_clean_buf_pool(&self) -> bool {
-        self.chunk_bufs.len() > self.chunks_limit && self.chunks_limit != 0
+        self.chunks_buf.len() > self.chunks_limit && self.chunks_limit != 0
     }
 
     /// Get the buffered chunk with given position.
     #[inline]
     pub fn chunk_buf_of_pos(&self, pos: Pos<DIMS>) -> Option<Arc<Chunk<T, DIMS>>> {
-        self.chunk_bufs.get(&pos).map(|r| r.clone())
+        self.chunks_buf.get(&pos).map(|r| r.clone())
     }
 
     /// Validates the given chunk position to dim mappings
     /// of this world.
     #[inline]
-    fn pos_in_range(&self, pos: Pos<DIMS>) -> Result<(), crate::Error> {
+    fn pos_in_range(&self, pos: Pos<DIMS>) -> crate::Result<()> {
         for (map, val) in self.mappings.iter().zip(pos.into_iter()) {
             map.in_range(val as u64)?;
         }
@@ -320,7 +322,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         assert_ne!(DIMS, 0, "there should be at least 1 dimensions");
 
         Self {
-            chunk_bufs: DashMap::new(),
+            chunks_buf: DashMap::new(),
             chunks_limit: 24,
             mappings: Arc::new(
                 dims.map(|value| DimMapping::new(value.range, value.items_per_chunk)),
@@ -334,13 +336,13 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     /// If the requested chunk does not exist, an empty chunk buffer
     /// will be created for use.
     async fn load_chunk_buf(&self, pos: Pos<DIMS>) -> Arc<Chunk<T, DIMS>> {
-        if let Some(val) = self.chunk_bufs.get(&pos) {
+        if let Some(val) = self.chunks_buf.get(&pos) {
             return val.clone();
         }
 
         // Clean buffer pool if it reaches the limit.
         if self.should_clean_buf_pool() {
-            self.chunk_bufs
+            self.chunks_buf
                 .retain(|_, chunk| chunk.writes.load(std::sync::atomic::Ordering::Acquire) > 0);
         }
 
@@ -364,7 +366,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
         // There are await points before this point, so
         // double-check if the chunk exists.
-        if let Some(val) = self.chunk_bufs.get(&pos) {
+        if let Some(val) = self.chunks_buf.get(&pos) {
             return val.clone();
         }
 
@@ -375,7 +377,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
             mappings: self.mappings.clone(),
             pos,
         });
-        self.chunk_bufs.insert(pos, arc.clone());
+        self.chunks_buf.insert(pos, arc.clone());
         arc
     }
 
@@ -385,7 +387,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     pub async fn chunk_buf_of_pos_or_load(
         &self,
         pos: Pos<DIMS>,
-    ) -> Result<Arc<Chunk<T, DIMS>>, crate::Error> {
+    ) -> crate::Result<Arc<Chunk<T, DIMS>>> {
         if let Some(val) = self.chunk_buf_of_pos(pos) {
             Ok(val)
         } else {
@@ -396,7 +398,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
     /// Gets the buffered chunk which the given data should be stored in.
     #[inline]
-    pub fn chunk_buf_of_data(&self, data: &T) -> Result<Option<Arc<Chunk<T, DIMS>>>, crate::Error> {
+    pub fn chunk_buf_of_data(&self, data: &T) -> crate::Result<Option<Arc<Chunk<T, DIMS>>>> {
         Ok(self.chunk_buf_of_pos(self.chunk_pos_of_data(data)?))
     }
 
@@ -404,21 +406,51 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     /// If the requested chunk buffer does not exist,
     /// a new chunk buffer will be loaded or created.
     #[inline]
-    pub async fn chunk_buf_of_data_or_load(
-        &self,
-        data: &T,
-    ) -> Result<Arc<Chunk<T, DIMS>>, crate::Error> {
+    pub async fn chunk_buf_of_data_or_load(&self, data: &T) -> crate::Result<Arc<Chunk<T, DIMS>>> {
         self.chunk_buf_of_pos_or_load(self.chunk_pos_of_data(data)?)
             .await
     }
 
     /// Gets position of chunk which the given data should be stored in.
-    pub fn chunk_pos_of_data(&self, data: &T) -> Result<Pos<DIMS>, crate::Error> {
+    pub fn chunk_pos_of_data(&self, data: &T) -> crate::Result<Pos<DIMS>> {
         let mut pos = [0; DIMS];
         for (i, (val, map)) in pos.iter_mut().zip(self.mappings.iter()).enumerate() {
             *val = map.chunk_of(data.dim(i))?;
         }
         Ok(pos)
+    }
+
+    /// Insert the given data to the chunk buffer which the data should be stored in.
+    ///
+    /// If the chunk buffer does not exist, a new chunk buffer will be loaded or created.
+    ///
+    /// If data with the id already exists, the data
+    /// will be replaced by the given data, and be
+    /// returned.
+    #[inline]
+    pub async fn insert(&self, data: T) -> crate::Result<Option<T>> {
+        Ok(self
+            .chunk_buf_of_data_or_load(&data)
+            .await?
+            .insert(data)
+            .await)
+    }
+
+    /// Insert the given data to the chunk buffer which the data should be stored in.
+    ///
+    /// If the chunk buffer does not exist, a new chunk buffer will be loaded or created.
+    ///
+    /// If data with the id already exists, or the
+    /// dimension values of the given data is invalid
+    /// for this chunk, the given data will be returned
+    /// in `Err` variant in `Result`.
+    #[inline]
+    pub async fn try_insert(&self, data: T) -> Result<(), T> {
+        if let Ok(chunk) = self.chunk_buf_of_data_or_load(&data).await {
+            chunk.try_insert(data).await
+        } else {
+            Err(data)
+        }
     }
 }
 
