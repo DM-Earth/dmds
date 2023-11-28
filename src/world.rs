@@ -346,16 +346,17 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 .retain(|_, chunk| chunk.writes.load(std::sync::atomic::Ordering::Acquire) > 0);
         }
 
-        let selection = Select {
-            world: self,
-            shape: Shape::Single(PosBox::new(pos.map(|e| e..=e))),
-        };
-
-        let mut stream = selection.iter();
         let mut items = Vec::new();
 
-        while let Some(res) = stream.next().await {
-            if let Ok(item) = res {
+        {
+            let selection = Select {
+                world: self,
+                shape: Shape::Single(PosBox::new(pos.map(|e| e..=e))),
+            };
+
+            let mut stream = selection.iter();
+
+            while let Some(Ok(item)) = stream.next().await {
                 let _ = item.init().await;
                 let id = item.id();
                 if let Some(e) = item.into_inner() {

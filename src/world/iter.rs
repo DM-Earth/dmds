@@ -327,6 +327,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                         if let U64Buf::Buf(buf) = dim {
                             match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
                                 Ok(8) => (),
+                                Ok(0) => return Poll::Ready(None),
                                 Ok(actlen) => {
                                     return Poll::Ready(Some(Err(std::io::Error::new(
                                         std::io::ErrorKind::UnexpectedEof,
@@ -373,11 +374,16 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                             if len == len_act {
                                 let lock = OnceLock::new();
                                 lock.set(*dims).unwrap();
+                                let id = dims[0];
+
+                                let buf = buf.clone().freeze();
+
+                                *progress = InProgress::Dims([U64Buf::Buf([0; 8]); DIMS]);
 
                                 Poll::Ready(Some(Ok(Lazy {
-                                    id: dims[0],
+                                    id,
                                     dims: lock,
-                                    method: LoadMethod::Io(buf.clone().freeze()),
+                                    method: LoadMethod::Io(buf),
                                     value: OnceLock::new(),
                                     chunk: *chunk,
                                     world,

@@ -48,6 +48,7 @@ impl IoHandle for MemStorage {
         Ok(Reader {
             chunks: read,
             chunk,
+            ptr: 0,
         })
     }
 
@@ -63,9 +64,7 @@ impl IoHandle for MemStorage {
         chunk.pop();
 
         let mut write = self.chunks.write().await;
-        if !write.contains_key(&chunk) {
-            write.insert(chunk.to_owned(), vec![]);
-        }
+        write.insert(chunk.to_owned(), vec![]);
 
         Ok(Writer {
             chunks: write,
@@ -79,6 +78,7 @@ impl IoHandle for MemStorage {
 pub struct Reader<'a> {
     chunks: async_lock::RwLockReadGuard<'a, HashMap<String, Vec<u8>>>,
     chunk: String,
+    ptr: usize,
 }
 
 impl AsyncRead for Reader<'_> {
@@ -89,8 +89,12 @@ impl AsyncRead for Reader<'_> {
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        let mut chunk = &this.chunks.get(&this.chunk).unwrap()[..];
-        futures_lite::AsyncRead::poll_read(std::pin::Pin::new(&mut chunk), cx, buf)
+        let mut chunk = &this.chunks.get(&this.chunk).unwrap()[this.ptr..];
+        let res = futures_lite::AsyncRead::poll_read(std::pin::Pin::new(&mut chunk), cx, buf);
+        if let std::task::Poll::Ready(Ok(len)) = res {
+            this.ptr += len;
+        }
+        res
     }
 
     #[inline]
