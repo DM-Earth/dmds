@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
-use crate::{IoHandle, WriteFinish};
+use crate::IoHandle;
 
 /// A simple in-memory storage implementing [`IoHandle`].
 ///
@@ -18,13 +18,31 @@ impl MemStorage {
     pub fn new() -> Self {
         Default::default()
     }
+
+    pub async fn write_chunk<const DIMS: usize>(
+        &self,
+        pos: [usize; DIMS],
+    ) -> std::io::Result<Writer<'_>> {
+        let mut chunk = String::new();
+        for dim in pos.iter() {
+            chunk.push_str(&dim.to_string());
+            chunk.push('_');
+        }
+        chunk.pop();
+
+        let mut write = self.chunks.write().await;
+        write.insert(chunk.to_owned(), vec![]);
+
+        Ok(Writer {
+            chunks: write,
+            chunk,
+        })
+    }
 }
 
 #[async_trait]
 impl IoHandle for MemStorage {
     type Read<'a> = Reader<'a> where Self: 'a;
-
-    type Write<'a> = Writer<'a> where Self: 'a;
 
     async fn read_chunk<const DIMS: usize>(
         &self,
@@ -49,26 +67,6 @@ impl IoHandle for MemStorage {
             chunks: read,
             chunk,
             ptr: 0,
-        })
-    }
-
-    async fn write_chunk<const DIMS: usize>(
-        &self,
-        pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Write<'_>> {
-        let mut chunk = String::new();
-        for dim in pos.iter() {
-            chunk.push_str(&dim.to_string());
-            chunk.push('_');
-        }
-        chunk.pop();
-
-        let mut write = self.chunks.write().await;
-        write.insert(chunk.to_owned(), vec![]);
-
-        Ok(Writer {
-            chunks: write,
-            chunk,
         })
     }
 }
@@ -167,15 +165,5 @@ impl AsyncWrite for Writer<'_> {
             std::pin::Pin::new(this.chunks.get_mut(&this.chunk).unwrap()),
             cx,
         )
-    }
-}
-
-impl WriteFinish for Writer<'_> {
-    #[inline]
-    fn poll_finish(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
     }
 }

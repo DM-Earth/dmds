@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use futures_lite::{future::block_on, AsyncWriteExt, StreamExt};
 
-use crate::{mem_io_handle::MemStorage, world::Dim, IoHandle, World};
+use crate::{mem_io_handle::MemStorage, world::Dim, World};
 
 #[test]
 fn buf_insert() {
@@ -244,11 +244,11 @@ fn buf_modify() {
             [
                 Dim {
                     range: ..1024,
-                    items_per_chunk: 128,
+                    items_per_chunk: 8,
                 },
                 Dim {
                     range: ..1024,
-                    items_per_chunk: 64,
+                    items_per_chunk: 8,
                 },
             ],
             MemStorage::new(),

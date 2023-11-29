@@ -14,7 +14,7 @@ mod tests;
 use std::ops::Deref;
 
 use async_trait::async_trait;
-use futures_lite::{AsyncRead, AsyncWrite};
+use futures_lite::AsyncRead;
 
 pub use world::{iter::Iter, iter::Lazy, Chunk, Dim, Select, World};
 
@@ -69,22 +69,11 @@ pub trait IoHandle: Send + Sync {
     where
         Self: 'a;
 
-    /// Type of writer.
-    type Write<'a>: WriteFinish + Unpin + Send + Sync + 'a
-    where
-        Self: 'a;
-
     /// Gets reader for given chunk position.
     async fn read_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
     ) -> std::io::Result<Self::Read<'_>>;
-
-    /// Gets writer for given chunk position.
-    async fn write_chunk<const DIMS: usize>(
-        &self,
-        pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Write<'_>>;
 }
 
 impl<P, T> IoHandle for P
@@ -93,7 +82,6 @@ where
     P: Deref<Target = T> + Send + Sync,
 {
     type Read<'a> = T::Read<'a> where Self: 'a;
-    type Write<'a> = T::Write<'a> where Self: 'a;
 
     #[doc = " Gets reader for given chunk position."]
     #[must_use]
@@ -115,37 +103,6 @@ where
     {
         self.deref().read_chunk(pos)
     }
-
-    #[doc = " Gets writer for given chunk position."]
-    #[must_use]
-    #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-    #[inline]
-    fn write_chunk<'life0, 'async_trait, const DIMS: usize>(
-        &'life0 self,
-        pos: [usize; DIMS],
-    ) -> ::core::pin::Pin<
-        Box<
-            dyn ::core::future::Future<Output = std::io::Result<Self::Write<'_>>>
-                + ::core::marker::Send
-                + 'async_trait,
-        >,
-    >
-    where
-        'life0: 'async_trait,
-        Self: 'async_trait,
-    {
-        self.deref().write_chunk(pos)
-    }
-}
-
-/// Trait representing IO types that perform
-/// some async actions after all bytes are wrote.
-pub trait WriteFinish: AsyncWrite {
-    /// Polls the async action.
-    fn poll_finish(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>>;
 }
 
 /// Represents error variants produced by this crate.

@@ -14,6 +14,15 @@ use crate::{Data, IoHandle};
 
 use super::{Chunk, ChunkData, Pos, World};
 
+macro_rules! ready_opt {
+    ($e:expr $(,)?) => {
+        match $e {
+            core::task::Poll::Ready(t) => t,
+            core::task::Poll::Pending => return Some(core::task::Poll::Pending),
+        }
+    };
+}
+
 /// A cell loads data in world lazily.
 #[derive(Debug)]
 pub struct Lazy<'w, T, const DIMS: usize, Io: IoHandle> {
@@ -326,15 +335,14 @@ impl Default for U64Buf {
     }
 }
 
-impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a, T, DIMS, Io> {
-    type Item = std::io::Result<Lazy<'a, T, DIMS, Io>>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> ChunkFromIoIter<'a, T, DIMS, Io> {
+    #[allow(clippy::type_complexity)]
+    fn poll_next_inner(
+        &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
+    ) -> Option<std::task::Poll<Option<std::io::Result<Lazy<'a, T, DIMS, Io>>>>> // None => call this func again.
+    {
+        let this = self;
         match this {
             ChunkFromIoIter::InProgress {
                 read,
@@ -345,16 +353,16 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                 InProgress::Dims(dims) => {
                     for dim in &mut *dims {
                         if let U64Buf::Buf(buf) = dim {
-                            match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
+                            match ready_opt!(Pin::new(&mut *read).poll_read(cx, buf)) {
                                 Ok(8) => (),
-                                Ok(0) => return Poll::Ready(None),
+                                Ok(0) => return Some(Poll::Ready(None)),
                                 Ok(actlen) => {
-                                    return Poll::Ready(Some(Err(std::io::Error::new(
+                                    return Some(Poll::Ready(Some(Err(std::io::Error::new(
                                         std::io::ErrorKind::UnexpectedEof,
                                         format!("read {actlen} bytes of length, expected 8 bytes"),
-                                    ))))
+                                    )))))
                                 }
-                                Err(err) => return Poll::Ready(Some(Err(err))),
+                                Err(err) => return Some(Poll::Ready(Some(Err(err)))),
                             }
                             *dim = U64Buf::Num(u64::from_be_bytes(*buf));
                         }
@@ -371,25 +379,25 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                         }),
                     );
 
-                    Pin::new(this).poll_next(cx)
+                    None
                 }
-                InProgress::Len(buf, dims) => match ready!(Pin::new(read).poll_read(cx, buf)) {
+                InProgress::Len(buf, dims) => match ready_opt!(Pin::new(read).poll_read(cx, buf)) {
                     Ok(4) => {
                         let len = u32::from_be_bytes(*buf) as usize;
                         let mut bytes = bytes::BytesMut::with_capacity(len);
                         bytes.put_bytes(0, len);
                         *progress = InProgress::Data(bytes, *dims);
-                        Pin::new(this).poll_next(cx)
+                        None
                     }
-                    Ok(len) => Poll::Ready(Some(Err(std::io::Error::new(
+                    Ok(len) => Some(Poll::Ready(Some(Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         format!("read {len} bytes of length, expected 4 bytes"),
-                    )))),
-                    Err(err) => Poll::Ready(Some(Err(err))),
+                    ))))),
+                    Err(err) => Some(Poll::Ready(Some(Err(err)))),
                 },
                 InProgress::Data(buf, dims) => {
                     let len = buf.len();
-                    match ready!(Pin::new(&mut *read).poll_read(cx, buf)) {
+                    match ready_opt!(Pin::new(&mut *read).poll_read(cx, buf)) {
                         Ok(len_act) => {
                             if len == len_act {
                                 let lock = OnceLock::new();
@@ -400,22 +408,22 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
 
                                 *progress = InProgress::Dims([U64Buf::Buf([0; 8]); DIMS]);
 
-                                Poll::Ready(Some(Ok(Lazy {
+                                Some(Poll::Ready(Some(Ok(Lazy {
                                     id,
                                     dims: lock,
                                     method: LoadMethod::Io(buf),
                                     value: OnceLock::new(),
                                     chunk: *chunk,
                                     world,
-                                })))
+                                }))))
                             } else {
-                                Poll::Ready(Some(Err(std::io::Error::new(
+                                Some(Poll::Ready(Some(Err(std::io::Error::new(
                                     std::io::ErrorKind::UnexpectedEof,
                                     format!("read {len_act} bytes of length, expected {len} bytes"),
-                                ))))
+                                )))))
                             }
                         }
-                        Err(err) => Poll::Ready(Some(Err(err))),
+                        Err(err) => Some(Poll::Ready(Some(Err(err)))),
                     }
                 }
             },
@@ -425,13 +433,13 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                 world,
             } => {
                 *this = Self::InProgress {
-                    read: match ready!(future.as_mut().poll(cx)) {
+                    read: match ready_opt!(future.as_mut().poll(cx)) {
                         Ok(val) => val,
                         Err(err) => {
                             return if err.kind() == std::io::ErrorKind::NotFound {
-                                Poll::Ready(None)
+                                Some(Poll::Ready(None))
                             } else {
-                                Poll::Ready(Some(Err(err)))
+                                Some(Poll::Ready(Some(Err(err))))
                             }
                         }
                     },
@@ -440,7 +448,24 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
                     world: *world,
                 };
 
-                Pin::new(this).poll_next(cx)
+                None
+            }
+        }
+    }
+}
+
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a, T, DIMS, Io> {
+    type Item = std::io::Result<Lazy<'a, T, DIMS, Io>>;
+
+    #[inline]
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(val) = this.poll_next_inner(cx) {
+                return val;
             }
         }
     }
@@ -546,23 +571,23 @@ where
 {
 }
 
-impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
-    type Item = crate::Result<Lazy<'a, T, DIMS, Io>>;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
+    #[allow(clippy::type_complexity)]
+    fn poll_next_inner(
+        &mut self,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
+    ) -> Option<std::task::Poll<Option<crate::Result<Lazy<'a, T, DIMS, Io>>>>> // None => call this func again.
+    {
+        let this = self;
         match this.current {
             Some(ChunkIter::Io(ref mut iter)) => {
-                if let Some(val) = ready!(Pin::new(iter).poll_next(cx)) {
-                    return Poll::Ready(Some(val.map_err(crate::Error::Io)));
+                if let Some(val) = ready_opt!(Pin::new(iter).poll_next(cx)) {
+                    return Some(Poll::Ready(Some(val.map_err(crate::Error::Io))));
                 }
             }
             Some(ChunkIter::Mem(ref mut iter)) => {
                 if let Some(val) = iter.next() {
-                    return Poll::Ready(Some(Ok(val)));
+                    return Some(Poll::Ready(Some(Ok(val))));
                 }
             }
             Some(ChunkIter::MemReadChunk {
@@ -570,7 +595,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
                 ref mut fut,
                 pos,
             }) => {
-                let guard = ready!(Pin::new(fut).poll(cx));
+                let guard = ready_opt!(Pin::new(fut).poll(cx));
                 this.current = Some(ChunkIter::Mem(ChunkFromMemIter {
                     world: this.world,
                     chunk: map_ref.clone(),
@@ -578,7 +603,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
                     guard: Arc::new(guard),
                     chunk_pos: pos,
                 }));
-                return Pin::new(this).poll_next(cx);
+                return None;
             }
             None => (),
         }
@@ -599,9 +624,26 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
                 }));
             }
 
-            Pin::new(this).poll_next(cx)
+            None
         } else {
-            Poll::Ready(None)
+            Some(Poll::Ready(None))
+        }
+    }
+}
+
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
+    type Item = crate::Result<Lazy<'a, T, DIMS, Io>>;
+
+    #[inline]
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(val) = this.poll_next_inner(cx) {
+                return val;
+            }
         }
     }
 }

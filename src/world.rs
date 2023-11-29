@@ -112,6 +112,8 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
             buf.put_u32(bytes.len() as u32);
             buf.put(bytes);
         }
+
+        self.writes.store(0, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
