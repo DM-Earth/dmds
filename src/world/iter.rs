@@ -8,12 +8,13 @@ use std::{
 
 use async_lock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use bytes::BufMut;
-use futures_lite::{ready, AsyncRead, FutureExt, Stream};
+use futures_lite::{AsyncRead, FutureExt, Stream};
 
 use crate::{Data, IoHandle};
 
 use super::{Chunk, ChunkData, Pos, World};
 
+/// `Some` variant of [`futures_lite::ready`].
 macro_rules! ready_opt {
     ($e:expr $(,)?) => {
         match $e {
