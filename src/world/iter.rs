@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     future::Future,
     pin::Pin,
     sync::{atomic, Arc, OnceLock},
@@ -211,7 +212,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     ///
     /// If the chunk buffer does not exist, the chunk will
     /// be loaded into buffer pool.
-    pub async fn burn(self) -> crate::Result<()> {
+    pub async fn destroy(self) -> crate::Result<()> {
         let this = self.get().await?;
         let id = this.dim(0);
         let chunk = self.world.chunk_buf_of_data_or_load(this).await?;
@@ -278,6 +279,25 @@ enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
         read: Io::Read<'a>,
         progress: InProgress<DIMS>,
     },
+}
+
+impl<T: Debug, const DIMS: usize, Io: IoHandle + Debug> std::fmt::Debug
+    for ChunkFromIoIter<'_, T, DIMS, Io>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pre { world, chunk, .. } => f
+                .debug_struct("Pre")
+                .field("world", world)
+                .field("chunk", chunk)
+                .finish(),
+            Self::InProgress { world, chunk, .. } => f
+                .debug_struct("InProgress")
+                .field("world", world)
+                .field("chunk", chunk)
+                .finish(),
+        }
+    }
 }
 
 /// Represents the progress of reading a data from bytes.
@@ -426,6 +446,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for ChunkFromIoIter<'a
     }
 }
 
+#[derive(Debug)]
 struct ChunkFromMemIter<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
     chunk_pos: [usize; DIMS],
@@ -458,6 +479,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
 
 /// An async iterator (namely stream) that iterates over a selection
 /// of chunks.
+#[derive(Debug)]
 pub struct Iter<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
 
@@ -488,6 +510,22 @@ impl<'a, T, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
             world,
             shape,
             current: None,
+        }
+    }
+}
+
+impl<T: Debug, const DIMS: usize, Io: IoHandle + Debug> std::fmt::Debug
+    for ChunkIter<'_, T, DIMS, Io>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(arg0) => f.debug_tuple("Io").field(arg0).finish(),
+            Self::MemReadChunk { map_ref, pos, .. } => f
+                .debug_struct("MemReadChunk")
+                .field("map_ref", map_ref)
+                .field("pos", pos)
+                .finish(),
+            Self::Mem(arg0) => f.debug_tuple("Mem").field(arg0).finish(),
         }
     }
 }

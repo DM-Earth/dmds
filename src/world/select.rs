@@ -14,6 +14,7 @@ pub struct PosBox<const DIMS: usize> {
     end: Pos<DIMS>,
 }
 
+#[derive(Debug)]
 pub struct PosBoxIter<'a, const DIMS: usize> {
     pos_box: &'a PosBox<DIMS>,
     next: Pos<DIMS>,
@@ -195,6 +196,7 @@ pub enum Shape<const DIMS: usize> {
     Multiple(Vec<PosBox<DIMS>>),
 }
 
+#[derive(Debug)]
 pub struct RawShapeIter<'a, const DIMS: usize> {
     shape: &'a Shape<DIMS>,
     current: Option<(usize, PosBoxIter<'a, DIMS>)>,

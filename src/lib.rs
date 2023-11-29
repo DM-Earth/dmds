@@ -87,7 +87,6 @@ pub trait IoHandle: Send + Sync {
     ) -> std::io::Result<Self::Write<'_>>;
 }
 
-#[async_trait]
 impl<P, T> IoHandle for P
 where
     T: IoHandle + 'static,
@@ -96,20 +95,46 @@ where
     type Read<'a> = T::Read<'a> where Self: 'a;
     type Write<'a> = T::Write<'a> where Self: 'a;
 
+    #[doc = " Gets reader for given chunk position."]
+    #[must_use]
+    #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
     #[inline]
-    async fn read_chunk<const DIMS: usize>(
-        &self,
+    fn read_chunk<'life0, 'async_trait, const DIMS: usize>(
+        &'life0 self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Read<'_>> {
-        self.deref().read_chunk(pos).await
+    ) -> ::core::pin::Pin<
+        Box<
+            dyn ::core::future::Future<Output = std::io::Result<Self::Read<'_>>>
+                + ::core::marker::Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.deref().read_chunk(pos)
     }
 
+    #[doc = " Gets writer for given chunk position."]
+    #[must_use]
+    #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
     #[inline]
-    async fn write_chunk<const DIMS: usize>(
-        &self,
+    fn write_chunk<'life0, 'async_trait, const DIMS: usize>(
+        &'life0 self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Write<'_>> {
-        self.deref().write_chunk(pos).await
+    ) -> ::core::pin::Pin<
+        Box<
+            dyn ::core::future::Future<Output = std::io::Result<Self::Write<'_>>>
+                + ::core::marker::Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.deref().write_chunk(pos)
     }
 }
 
