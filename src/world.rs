@@ -76,6 +76,8 @@ impl<T, const DIMS: usize> Chunk<T, DIMS> {
         let mut w = self.data.write().await;
         if let Some(index) = w.iter().position(|v| v.0 == id) {
             let (_, d) = w.remove(index);
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             Some(d.into_inner())
         } else {
             None
@@ -187,6 +189,26 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         }
         true
     }
+}
+
+/// Creates a new world.
+///
+/// # Example
+///
+/// ```
+/// # use dmds::{world, World, mem_io_handle::MemStorage};
+/// #
+/// let world: World<[u64; 2], 2, _> = world! {
+///     MemStorage::new() => 16 | ..1024, 8 | ..128
+/// };
+///
+/// # let _ = world;
+/// ```
+#[macro_export]
+macro_rules! world {
+    ($io:expr => $($ipc:literal | $dr:expr),+) => {
+        $crate::World::new([$($crate::Dim{range:$dr,items_per_chunk:$ipc},)+], $io)
+    };
 }
 
 /// A world containing chunks, in multi-dimensions.

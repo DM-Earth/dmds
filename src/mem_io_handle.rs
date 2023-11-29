@@ -73,7 +73,7 @@ impl IoHandle for MemStorage {
     }
 }
 
-/// A reader for [`Mem`].
+/// A reader for [`MemStorage`].
 #[derive(Debug)]
 pub struct Reader<'a> {
     chunks: async_lock::RwLockReadGuard<'a, HashMap<String, Vec<u8>>>,
@@ -109,7 +109,7 @@ impl AsyncRead for Reader<'_> {
     }
 }
 
-/// A writer for [`Mem`].
+/// A writer for [`MemStorage`].
 #[derive(Debug)]
 pub struct Writer<'a> {
     chunks: async_lock::RwLockWriteGuard<'a, HashMap<String, Vec<u8>>>,

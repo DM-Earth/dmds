@@ -2,7 +2,6 @@
 mod range;
 
 /// Module containing in-memory IO handlers for testing.
-#[cfg(test)]
 pub mod mem_io_handle;
 
 /// Module containing world implementation.
@@ -17,7 +16,7 @@ use std::ops::Deref;
 use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
-pub use world::{iter::Iter, iter::Lazy, Chunk, Select, World};
+pub use world::{iter::Iter, iter::Lazy, Chunk, Dim, Select, World};
 
 /// Represents types stored directly in a dimensional world.
 pub trait Data: Sized + Send + Sync + Unpin {

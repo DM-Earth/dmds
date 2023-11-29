@@ -523,7 +523,8 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, 
                     iter: unsafe { std::mem::transmute(guard.iter()) },
                     guard: Arc::new(guard),
                     chunk_pos: pos,
-                }))
+                }));
+                return Pin::new(this).poll_next(cx);
             }
             None => (),
         }
