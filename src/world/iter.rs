@@ -530,6 +530,22 @@ impl<T: Debug, const DIMS: usize, Io: IoHandle + Debug> std::fmt::Debug
     }
 }
 
+unsafe impl<'a, R, T, const DIMS: usize, Io> Send for Iter<'a, T, DIMS, Io>
+where
+    R: Send,
+    T: Send,
+    Io: IoHandle<Read<'a> = R>,
+{
+}
+
+unsafe impl<'a, R, T, const DIMS: usize, Io> Sync for Iter<'a, T, DIMS, Io>
+where
+    R: Sync,
+    T: Sync,
+    Io: IoHandle<Read<'a> = R>,
+{
+}
+
 impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Stream for Iter<'a, T, DIMS, Io> {
     type Item = crate::Result<Lazy<'a, T, DIMS, Io>>;
 
