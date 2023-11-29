@@ -244,11 +244,11 @@ fn buf_modify() {
             [
                 Dim {
                     range: ..1024,
-                    items_per_chunk: 8,
+                    items_per_chunk: 32,
                 },
                 Dim {
                     range: ..1024,
-                    items_per_chunk: 8,
+                    items_per_chunk: 32,
                 },
             ],
             MemStorage::new(),
