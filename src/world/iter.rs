@@ -617,12 +617,15 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
                     map_ref: chunk_l.value().clone(),
                     pos,
                 });
-            } else {
+            } else if this.world.io_handle.hint_is_valid(&pos) {
                 this.current = Some(ChunkIter::Io(ChunkFromIoIter::Pre {
                     world: this.world,
                     future: this.world.io_handle.read_chunk(pos),
                     chunk: pos,
                 }));
+            } else {
+                this.current = None;
+                return None;
             }
 
             None

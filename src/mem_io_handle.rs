@@ -14,11 +14,13 @@ pub struct MemStorage {
 }
 
 impl MemStorage {
+    /// Creates a new [`MemStorage`].
     #[inline]
     pub fn new() -> Self {
         Default::default()
     }
 
+    /// Writes a chunk to this storage.
     pub async fn write_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],

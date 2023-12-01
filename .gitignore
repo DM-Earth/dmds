@@ -7,3 +7,4 @@ Cargo.lock
 *.pdb
 
 /.vscode
+**/.test

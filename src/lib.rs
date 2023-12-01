@@ -16,7 +16,7 @@ use std::ops::Deref;
 use async_trait::async_trait;
 use futures_lite::AsyncRead;
 
-pub use world::{iter::Iter, iter::Lazy, Chunk, Dim, Select, World};
+pub use world::{iter::Iter, iter::Lazy, Chunk, Chunks, Dim, Select, World};
 
 /// Represents types stored directly in a dimensional world.
 pub trait Data: Sized + Send + Sync + Unpin {
@@ -34,7 +34,7 @@ pub trait Data: Sized + Send + Sync + Unpin {
 
     /// Encode this type into bytes buffer.
     ///
-    /// Note: You don't need to encode dimensional values.
+    /// To implementors: You don't need to encode dimensional values.
     /// They will be encoded automatically.
     fn encode<B: bytes::BufMut>(&self, buf: B) -> std::io::Result<()>;
 }
@@ -69,6 +69,16 @@ pub trait IoHandle: Send + Sync {
     where
         Self: 'a;
 
+    /// Hints if the chunk with given position is valid.
+    ///
+    /// If the chunk is hinted by valid, the world will
+    /// load it from this handler.
+    #[inline]
+    fn hint_is_valid(&self, pos: &[usize]) -> bool {
+        let _ = pos;
+        true
+    }
+
     /// Gets reader for given chunk position.
     async fn read_chunk<const DIMS: usize>(
         &self,
@@ -82,6 +92,11 @@ where
     P: Deref<Target = T> + Send + Sync,
 {
     type Read<'a> = T::Read<'a> where Self: 'a;
+
+    #[inline]
+    fn hint_is_valid(&self, pos: &[usize]) -> bool {
+        self.deref().hint_is_valid(pos)
+    }
 
     #[doc = " Gets reader for given chunk position."]
     #[must_use]
@@ -111,21 +126,15 @@ pub enum Error {
     /// IO Error.
     #[error("io err: {0}")]
     Io(std::io::Error),
-    /// Requesting value has been taken.
-    #[error("requesting value has been taken")]
-    ValueTaken,
+
     /// Requesting value not found.
     #[error("requesting value not found")]
     ValueNotFound,
-    /// Requested iterator, or stream, has been updated.
-    #[error("requested stream has been updated.")]
-    IterUpdated {
-        expected: usize,
-        current: Option<usize>,
-    },
+
     /// Given value out of range.
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]
     ValueOutOfRange { range: (u64, u64), value: u64 },
 }
 
+/// Type alias for result produced by this crate.
 type Result<T> = std::result::Result<T, Error>;

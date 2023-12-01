@@ -135,6 +135,9 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 
         assert!(self.vals_in_range(vals), "given data is invalid to this chunk. data dimension values: {vals:?}, chunk position: {:?}", self.pos);
 
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
         {
             let r = self.data.write().await;
             if let Some((_, d)) = r.iter().find(|v| v.0 == vals[0]) {
@@ -146,6 +149,7 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         }
 
         self.data.write().await.push((vals[0], RwLock::new(data)));
+
         None
     }
 
@@ -318,12 +322,39 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 
     /// Validates the given chunk position to dim mappings
     /// of this world.
-    #[inline]
     fn pos_in_range(&self, pos: Pos<DIMS>) -> crate::Result<()> {
         for (map, val) in self.mappings.iter().zip(pos.into_iter()) {
             map.in_range(val as u64)?;
         }
         Ok(())
+    }
+
+    /// Gets an iterator of chunk buffers.
+    #[inline]
+    pub fn chunks(&self) -> Chunks<'_, T, DIMS> {
+        Chunks {
+            iter: self.chunks_buf.iter(),
+        }
+    }
+
+    /// Gets the IO handler of this world.
+    #[inline]
+    pub fn io_handle(&self) -> &Io {
+        &self.io_handle
+    }
+}
+
+/// Iterator of chunk buffers returned by [`World::chunks`].
+pub struct Chunks<'a, T, const DIMS: usize> {
+    iter: dashmap::iter::Iter<'a, Pos<DIMS>, Arc<Chunk<T, DIMS>>>,
+}
+
+impl<'a, T, const DIMS: usize> Iterator for Chunks<'a, T, DIMS> {
+    type Item = dashmap::mapref::multiple::RefMulti<'a, Pos<DIMS>, Arc<Chunk<T, DIMS>>>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
     }
 }
 

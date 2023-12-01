@@ -1,5 +1,5 @@
 [package]
-name = "dmds-tokio-daemon"
+name = "dmds-tokio-fs"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 dmds = { path = "../" }
 async-trait = "0.1"
-tokio = { version = "1.34", features = ["fs", "io-util"] }
-futures-lite = "*"
+tokio = { version = "1.34", features = ["fs", "io-util", "time", "rt"] }
+futures = { version = "0.3", features = ["executor"] }
 dashmap = "5.5"
 bytes = "1.5"
