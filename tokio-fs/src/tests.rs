@@ -12,7 +12,7 @@ fn shutdown_handle() {
         .unwrap();
     rt.block_on(async {
         let world: Arc<World<[u64; 2], 2, _>> = Arc::new(world! {
-            FsHandle::new(".test/fs_save", false) => 64 | ..1024, 64 | ..1024
+            FsHandle::new(".test/fs_save", false), 64 | ..1024, 64 | ..1024
         });
         let _sh = ShutdownHandle::new(world.clone());
 

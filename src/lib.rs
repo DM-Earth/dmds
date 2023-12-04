@@ -4,6 +4,7 @@ mod range;
 /// Module containing in-memory IO handlers for testing.
 pub mod mem_io_handle;
 
+mod macros;
 /// Module containing world implementation.
 mod world;
 
@@ -17,6 +18,9 @@ use async_trait::async_trait;
 use futures_lite::AsyncRead;
 
 pub use world::{iter::Iter, iter::Lazy, Chunk, Chunks, Dim, Select, World};
+
+#[doc(hidden)]
+pub use futures_lite::StreamExt;
 
 /// Represents types stored directly in a dimensional world.
 pub trait Data: Sized + Send + Sync + Unpin {

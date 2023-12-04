@@ -27,10 +27,8 @@ fn buf_insert() {
         let w_read = world.chunks_buf.iter().next().unwrap();
         let chunk_read = w_read.data.read().await;
 
-        let (id, val) = chunk_read.get(0).unwrap();
-
-        assert_eq!(*id, 114);
-        assert_eq!([*id, 514], *val.read().await);
+        let val = chunk_read.get(&114).unwrap();
+        assert_eq!([114, 514], *val.read().await);
     })
 }
 
@@ -66,7 +64,7 @@ fn buf_remove() {
         let w_read = world.chunks_buf.iter().next().unwrap();
         let chunk_read = w_read.data.read().await;
 
-        assert!(chunk_read.get(0).is_none());
+        assert!(chunk_read.is_empty());
     })
 }
 

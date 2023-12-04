@@ -2,6 +2,7 @@ pub mod iter;
 mod select;
 
 use std::{
+    collections::BTreeMap,
     ops::{RangeBounds, RangeInclusive},
     sync::{atomic::AtomicUsize, Arc},
 };
@@ -21,7 +22,7 @@ use self::select::{PosBox, Shape};
 // See #43408 (rust-lang/rust).
 
 pub type Pos<const DIMS: usize> = [usize; DIMS];
-type ChunkData<T> = Vec<(u64, RwLock<T>)>;
+type ChunkData<T> = BTreeMap<u64, RwLock<T>>;
 
 /// A buffered chunk storing data in memory.
 ///
@@ -73,15 +74,11 @@ impl<T, const DIMS: usize> Chunk<T, DIMS> {
     ///
     /// Returns the removed data if it exists.
     pub async fn remove(&self, id: u64) -> Option<T> {
-        let mut w = self.data.write().await;
-        if let Some(index) = w.iter().position(|v| v.0 == id) {
-            let (_, d) = w.remove(index);
+        self.data.write().await.remove(&id).map(|d| {
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            Some(d.into_inner())
-        } else {
-            None
-        }
+            d.into_inner()
+        })
     }
 }
 
@@ -98,11 +95,11 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
             return Ok(());
         };
 
-        let datas_read = self.data.read().await;
-        for data in datas_read.iter() {
+        let chunk_data_read = self.data.read().await;
+        for data in chunk_data_read.iter() {
             let data_read = data.1.read().await;
-            debug_assert_eq!(data.0, data_read.dim(0), "data id should be immutable");
-            buf.put_u64(data.0);
+            debug_assert_eq!(*data.0, data_read.dim(0), "data id should be immutable");
+            buf.put_u64(*data.0);
             for dim_i in 1..T::DIMS {
                 buf.put_u64(data_read.dim(dim_i));
             }
@@ -138,19 +135,11 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         self.writes
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
-        {
-            let r = self.data.write().await;
-            if let Some((_, d)) = r.iter().find(|v| v.0 == vals[0]) {
-                let mut wd = d.write().await;
-                let mut data = data;
-                std::mem::swap(&mut data, &mut wd);
-                return Some(data);
-            }
-        }
-
-        self.data.write().await.push((vals[0], RwLock::new(data)));
-
-        None
+        self.data
+            .write()
+            .await
+            .insert(vals[0], RwLock::new(data))
+            .map(RwLock::into_inner)
     }
 
     /// Insert the given data to this chunk buffer.
@@ -171,10 +160,12 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 
         let mut w = self.data.write().await;
 
-        if w.iter_mut().any(|v| v.0 == vals[0]) {
+        if w.get(&vals[0]).is_some() {
             Err(data)
         } else {
-            w.push((vals[0], RwLock::new(data)));
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            w.insert(vals[0], RwLock::new(data));
             Ok(())
         }
     }
@@ -195,26 +186,6 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         }
         true
     }
-}
-
-/// Creates a new world.
-///
-/// # Example
-///
-/// ```
-/// # use dmds::{world, World, mem_io_handle::MemStorage};
-/// #
-/// let world: World<[u64; 2], 2, _> = world! {
-///     MemStorage::new() => 16 | ..1024, 8 | ..128
-/// };
-///
-/// # let _ = world;
-/// ```
-#[macro_export]
-macro_rules! world {
-    ($io:expr => $($ipc:literal | $dr:expr),+) => {
-        $crate::World::new([$($crate::Dim{range:$dr,items_per_chunk:$ipc},)+], $io)
-    };
 }
 
 /// A world containing chunks, in multi-dimensions.
@@ -266,6 +237,7 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                     return Select {
                         world: self,
                         shape: Shape::None,
+                        hint: vec![],
                     };
                 }
             } else {
@@ -276,6 +248,7 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         Select {
             world: self,
             shape: Shape::Single(PosBox::new(arr)),
+            hint: vec![],
         }
     }
 
@@ -296,6 +269,7 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                     return Select {
                         world: self,
                         shape: Shape::None,
+                        hint: vec![],
                     };
                 }
             } else {
@@ -306,7 +280,14 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         Select {
             world: self,
             shape: Shape::Single(PosBox::new(arr)),
+            hint: vec![],
         }
+    }
+
+    /// Select all chunks in this world.
+    #[inline]
+    pub fn select_all(&self) -> Select<'_, T, DIMS, Io> {
+        self.range_select(0, ..)
     }
 
     #[inline]
@@ -401,12 +382,13 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 .retain(|_, chunk| chunk.writes.load(std::sync::atomic::Ordering::Acquire) > 0);
         }
 
-        let mut items = Vec::new();
+        let mut items = BTreeMap::new();
 
         {
             let selection = Select {
                 world: self,
                 shape: Shape::Single(PosBox::new(pos.map(|e| e..=e))),
+                hint: vec![],
             };
 
             let mut stream = selection.iter();
@@ -415,7 +397,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 let _ = item.init().await;
                 let id = item.id();
                 if let Some(e) = item.into_inner() {
-                    items.push((id, RwLock::new(e)))
+                    items.insert(id, RwLock::new(e));
                 }
             }
         }
@@ -514,45 +496,77 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
 pub struct Select<'w, T, const DIMS: usize, Io: IoHandle> {
     world: &'w World<T, DIMS, Io>,
     shape: Shape<DIMS>,
+
+    hint: Vec<u64>,
 }
 
 impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
     /// Select a range of chunks in the given dimension,
     /// and intersect with current selection.
     #[inline]
-    pub fn range_and(&mut self, dim: usize, range: impl RangeBounds<u64> + Clone) {
-        if let Shape::Single(v) = self.world.range_select(dim, range).shape {
-            self.shape.intersect(v)
+    pub fn range_and(self, dim: usize, range: impl RangeBounds<u64> + Clone) -> Self {
+        let mut this = self;
+        if let Shape::Single(v) = this.world.range_select(dim, range).shape {
+            this.shape.intersect(v)
         }
+        this
     }
 
     /// Select from a value in the given dimension,
     /// and intersect with current selection.
     #[inline]
-    pub fn and(&mut self, dim: usize, value: u64) {
-        if let Shape::Single(v) = self.world.select(dim, value).shape {
-            self.shape.intersect(v)
+    pub fn and(self, dim: usize, value: u64) -> Self {
+        let mut this = self;
+        if let Shape::Single(v) = this.world.select(dim, value).shape {
+            this.shape.intersect(v)
         }
+        this
     }
 
     /// Select a range of chunks in the given dimension,
     /// and combine with current selection.
     #[inline]
-    pub fn range_plus(&mut self, dim: usize, range: impl RangeBounds<u64> + Clone) {
-        self.shape += self.world.range_select(dim, range).shape
+    pub fn range_plus(self, dim: usize, range: impl RangeBounds<u64> + Clone) -> Self {
+        let mut this = self;
+        this.shape += this.world.range_select(dim, range).shape;
+        this
     }
 
     /// Select from a value in the given dimension,
     /// and combine with current selection.
     #[inline]
-    pub fn plus(&mut self, dim: usize, value: u64) {
-        self.shape += self.world.select(dim, value).shape
+    pub fn plus(self, dim: usize, value: u64) -> Self {
+        let mut this = self;
+        this.shape += this.world.select(dim, value).shape;
+        this
+    }
+
+    /// Pushes a hint of target data id.
+    ///
+    /// If possible, the iterator will only iterate data items
+    /// with the hinted ids.
+    #[inline]
+    pub fn hint(self, target: u64) -> Self {
+        let mut this = self;
+        this.hint.push(target);
+        this
+    }
+
+    /// Pushes hints of target data ids.
+    ///
+    /// If possible, the iterator will only iterate data items
+    /// with the hinted ids.
+    #[inline]
+    pub fn hints(self, target: impl IntoIterator<Item = u64>) -> Self {
+        let mut this = self;
+        this.hint.extend(target);
+        this
     }
 
     /// Returns an async iterator (namely `Stream`) of this selection
     /// that iterate data items.
     #[inline]
     pub fn iter(&self) -> iter::Iter<'_, T, DIMS, Io> {
-        iter::Iter::new(self.world, self.shape.iter())
+        iter::Iter::new(self.world, self.shape.iter(), (&self.hint[..]).into())
     }
 }

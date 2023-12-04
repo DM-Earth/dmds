@@ -197,13 +197,13 @@ pub enum Shape<const DIMS: usize> {
 }
 
 #[derive(Debug)]
-pub struct RawShapeIter<'a, const DIMS: usize> {
+pub struct ShapeIter<'a, const DIMS: usize> {
     shape: &'a Shape<DIMS>,
     current: Option<(usize, PosBoxIter<'a, DIMS>)>,
     done: Vec<Pos<DIMS>>,
 }
 
-impl<const DIMS: usize> RawShapeIter<'_, DIMS> {
+impl<const DIMS: usize> ShapeIter<'_, DIMS> {
     fn fetch_next_usable_iter<'a>(
         shape: &'a Shape<DIMS>,
         iter: &mut PosBoxIter<'a, DIMS>,
@@ -252,7 +252,7 @@ impl<const DIMS: usize> RawShapeIter<'_, DIMS> {
     }
 }
 
-impl<const DIMS: usize> Iterator for RawShapeIter<'_, DIMS> {
+impl<const DIMS: usize> Iterator for ShapeIter<'_, DIMS> {
     type Item = Pos<DIMS>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -289,8 +289,8 @@ impl<const DIMS: usize> Shape<DIMS> {
         }
     }
 
-    pub fn iter(&self) -> RawShapeIter<'_, DIMS> {
-        RawShapeIter {
+    pub fn iter(&self) -> ShapeIter<'_, DIMS> {
+        ShapeIter {
             shape: self,
             current: match self {
                 Shape::None => None,

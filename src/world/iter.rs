@@ -1,4 +1,5 @@
 use std::{
+    collections::btree_map,
     fmt::Debug,
     future::Future,
     pin::Pin,
@@ -236,14 +237,10 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     async unsafe fn load_chunk(&mut self) -> crate::Result<Arc<Chunk<T, DIMS>>> {
         let chunk = self.world.load_chunk_buf(self.chunk).await;
         // Guard of a chunk.
-        type Guard<'a, T> = RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>;
+        type Guard<'a, T> = RwLockReadGuard<'a, super::ChunkData<T>>;
         // SAFETY: wrapping lifetime to 'w.
         let guard: Arc<Guard<'w, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
-        let lock = &*(&guard
-            .iter()
-            .find(|e| e.0 == self.id)
-            .ok_or(crate::Error::ValueNotFound)?
-            .1 as *const RwLock<T>);
+        let lock = &*(guard.get(&self.id).ok_or(crate::Error::ValueNotFound)? as *const RwLock<T>);
 
         if let Some(LazyInner::Ref(val)) = self.value.get_mut() {
             val.guard = None;
@@ -480,16 +477,69 @@ struct ChunkFromMemIter<'a, T, const DIMS: usize, Io: IoHandle> {
     chunk: Arc<Chunk<T, DIMS>>,
     guard: Arc<RwLockReadGuard<'a, ChunkData<T>>>,
 
-    iter: std::slice::Iter<'a, (u64, RwLock<T>)>,
+    map_interact: ChunkFromMemIterMapInteract<'a, T>,
 }
 
-impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter<'a, T, DIMS, Io> {
-    type Item = Lazy<'a, T, DIMS, Io>;
+#[derive(Debug)]
+enum ChunkFromMemIterMapInteract<'a, T> {
+    /// Specify the target of iteration. With the hint,
+    /// the iterator will only iterate these hinted values,
+    /// so that other unneeded values will not be iterated.
+    Hint(ArcSliceIter<u64>),
+    Iter(btree_map::Iter<'a, u64, RwLock<T>>),
+}
 
+#[derive(Debug)]
+struct ArcSliceIter<T> {
+    ptr: usize,
+    data: Arc<[T]>,
+}
+
+impl<T: Copy> Iterator for ArcSliceIter<T> {
+    type Item = T;
+
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let (id, lock) = self.iter.next()?;
-        Some(Lazy {
-            id: *id,
+        if self.ptr < self.data.len() {
+            let val = self.data[self.ptr];
+            self.ptr += 1;
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> ChunkFromMemIter<'a, T, DIMS, Io> {
+    fn next_inner(&mut self) -> Option<Option<Lazy<'a, T, DIMS, Io>>> {
+        let (id, lock);
+        match self.map_interact {
+            ChunkFromMemIterMapInteract::Hint(ref mut hint) => {
+                if let Some(id_hint) = hint.next() {
+                    if let Some(l) = self.guard.get(&id_hint) {
+                        id = id_hint;
+                        lock = unsafe {
+                            //SAFETY: wrapping lifetime
+                            std::mem::transmute(l)
+                        };
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return Some(None);
+                }
+            }
+            ChunkFromMemIterMapInteract::Iter(ref mut iter) => {
+                let Some((i, l)) = iter.next() else {
+                    return Some(None);
+                };
+                id = *i;
+                lock = l;
+            }
+        }
+
+        Some(Some(Lazy {
+            id,
             chunk: self.chunk_pos,
             dims: OnceLock::new(),
             method: LoadMethod::Mem {
@@ -499,7 +549,19 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
             },
             value: OnceLock::new(),
             world: self.world,
-        })
+        }))
+    }
+}
+
+impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter<'a, T, DIMS, Io> {
+    type Item = Lazy<'a, T, DIMS, Io>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(val) = self.next_inner() {
+                return val;
+            }
+        }
     }
 }
 
@@ -509,12 +571,14 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iterator for ChunkFromMemIter
 pub struct Iter<'a, T, const DIMS: usize, Io: IoHandle> {
     world: &'a World<T, DIMS, Io>,
 
-    shape: super::select::RawShapeIter<'a, DIMS>,
+    shape: super::select::ShapeIter<'a, DIMS>,
     current: Option<ChunkIter<'a, T, DIMS, Io>>,
+
+    hint: Arc<[u64]>,
 }
 
 type ReadLockFut<'a, T> =
-    dyn std::future::Future<Output = async_lock::RwLockReadGuard<'a, Vec<(u64, RwLock<T>)>>> + 'a;
+    dyn std::future::Future<Output = async_lock::RwLockReadGuard<'a, super::ChunkData<T>>> + 'a;
 
 enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
     Io(ChunkFromIoIter<'a, T, DIMS, Io>),
@@ -528,14 +592,16 @@ enum ChunkIter<'a, T, const DIMS: usize, Io: IoHandle> {
 
 impl<'a, T, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
     #[inline]
-    pub(super) const fn new(
+    pub(super) fn new(
         world: &'a World<T, DIMS, Io>,
-        shape: super::select::RawShapeIter<'a, DIMS>,
+        shape: super::select::ShapeIter<'a, DIMS>,
+        hint: Arc<[u64]>,
     ) -> Self {
         Self {
             world,
             shape,
             current: None,
+            hint,
         }
     }
 }
@@ -579,8 +645,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
         cx: &mut std::task::Context<'_>,
     ) -> Option<std::task::Poll<Option<crate::Result<Lazy<'a, T, DIMS, Io>>>>> // None => call this func again.
     {
-        let this = self;
-        match this.current {
+        match self.current {
             Some(ChunkIter::Io(ref mut iter)) => {
                 if let Some(val) = ready_opt!(Pin::new(iter).poll_next(cx)) {
                     return Some(Poll::Ready(Some(val.map_err(crate::Error::Io))));
@@ -597,10 +662,20 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
                 pos,
             }) => {
                 let guard = ready_opt!(Pin::new(fut).poll(cx));
-                this.current = Some(ChunkIter::Mem(ChunkFromMemIter {
-                    world: this.world,
+                self.current = Some(ChunkIter::Mem(ChunkFromMemIter {
+                    world: self.world,
                     chunk: map_ref.clone(),
-                    iter: unsafe { std::mem::transmute(guard.iter()) },
+                    map_interact: if self.hint.is_empty() {
+                        ChunkFromMemIterMapInteract::Iter(unsafe {
+                            //SAFETY: wrapping lifetime
+                            std::mem::transmute(guard.iter())
+                        })
+                    } else {
+                        ChunkFromMemIterMapInteract::Hint(ArcSliceIter {
+                            ptr: 0,
+                            data: self.hint.clone(),
+                        })
+                    },
                     guard: Arc::new(guard),
                     chunk_pos: pos,
                 }));
@@ -609,22 +684,22 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
             None => (),
         }
 
-        if let Some(pos) = this.shape.next() {
-            if let Some(chunk_l) = this.world.chunks_buf.get(&pos) {
-                this.current = Some(ChunkIter::MemReadChunk {
+        if let Some(pos) = self.shape.next() {
+            if let Some(chunk_l) = self.world.chunks_buf.get(&pos) {
+                self.current = Some(ChunkIter::MemReadChunk {
                     // SAFETY: wrapping lifetime
                     fut: unsafe { std::mem::transmute(chunk_l.value().data.read().boxed()) },
                     map_ref: chunk_l.value().clone(),
                     pos,
                 });
-            } else if this.world.io_handle.hint_is_valid(&pos) {
-                this.current = Some(ChunkIter::Io(ChunkFromIoIter::Pre {
-                    world: this.world,
-                    future: this.world.io_handle.read_chunk(pos),
+            } else if self.world.io_handle.hint_is_valid(&pos) {
+                self.current = Some(ChunkIter::Io(ChunkFromIoIter::Pre {
+                    world: self.world,
+                    future: self.world.io_handle.read_chunk(pos),
                     chunk: pos,
                 }));
             } else {
-                this.current = None;
+                self.current = None;
                 return None;
             }
 
