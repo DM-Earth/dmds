@@ -7,6 +7,7 @@ description = "Dmds I/O handler interacts with the filesystem using Tokio"
 repository = "https://github.com/DM-Earth/dmds"
 license = "LGPL-3.0-or-later"
 categories = ["asynchronous"]
+readme = "readme.md"
 
 [badges]
 maintenance = { status = "actively-developed" }
