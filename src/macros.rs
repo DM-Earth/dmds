@@ -1,6 +1,6 @@
 /// Creates a new world.
 ///
-/// See [`World::new`] for more information.
+/// See [`crate::World::new`] for more information.
 ///
 /// # Syntax
 ///

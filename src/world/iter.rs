@@ -171,6 +171,8 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
 
     /// Gets the inner value mutably or initialize it
     /// if it's uninitialized.
+    ///
+    /// Make sure to call [`Self::close`] after modification.
     pub async fn get_mut(&mut self) -> crate::Result<&mut T> {
         if let Some(LazyInner::RefMut(val)) = self
             .value
@@ -186,6 +188,8 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
     }
 
+    /// Move this data into the chunk it should belongs to
+    /// if this data is not suited in the chunk it belongs to now.
     pub async fn close(self) -> crate::Result<()> {
         let mut this = self;
         let (world, old_chunk) = (this.world, this.chunk);

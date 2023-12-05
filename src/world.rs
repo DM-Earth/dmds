@@ -24,7 +24,7 @@ use self::select::{PosBox, Shape};
 pub type Pos<const DIMS: usize> = [usize; DIMS];
 type ChunkData<T> = BTreeMap<u64, RwLock<DataInner<T>>>;
 
-/// If the data not exists, then is was moved.
+// If the data not exists, then is was moved.
 type DataInner<T> = Option<T>;
 
 /// A buffered chunk storing data in memory.
@@ -227,6 +227,27 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 /// Each data items contains values of each dimension, like a position.
 /// The value of the first (zero) dimension is the actual position, or and identifier,
 /// of a data item. It is fixed, and should not be conflicted.
+///
+/// Values of other dimensions can be modificated freely, and it will be
+/// moved into a new chunk if needed.
+///
+/// ## Chunk dimensions
+///
+/// Each dimensions are splited into chunks, and chunks in every dimensions
+/// make into chunks in multi-dimensional worlds.
+///
+/// Here is a 2-dimensional world:
+///
+/// ```txt
+/// dim0
+/// ----|----|----|----|
+///                    |
+///     +    +    +   -|
+///                    | dim1
+/// ```
+///
+/// In dimension 0, the whole dimension is splited into 4 chunks, and in
+/// dimension 1 there are 2. So we got 8 chunks in this world.
 #[derive(Debug)]
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.

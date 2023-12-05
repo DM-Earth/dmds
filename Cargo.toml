@@ -2,6 +2,9 @@
 name = "dmds"
 version = "0.1.0"
 edition = "2021"
+authors = ["JieningYu <jiening.yu@outlook.com>"]
+description = "Multidimensional database implemented in Rust"
+repository = "https://github.com/DM-Earth/dmds"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
