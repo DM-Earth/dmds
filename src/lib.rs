@@ -130,11 +130,14 @@ pub enum Error {
     /// IO Error.
     #[error("io err: {0}")]
     Io(std::io::Error),
-
     /// Requesting value not found.
     #[error("requesting value not found")]
     ValueNotFound,
-
+    /// Requesting value was moved to another chunk buffer.
+    /// This is usually due to the target data was not suitable
+    /// in the chunk after its modification.
+    #[error("requesting value was moved to another chunk buffer")]
+    ValueMoved,
     /// Given value out of range.
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]
     ValueOutOfRange { range: (u64, u64), value: u64 },

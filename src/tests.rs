@@ -28,7 +28,7 @@ fn buf_insert() {
         let chunk_read = w_read.data.read().await;
 
         let val = chunk_read.get(&114).unwrap();
-        assert_eq!([114, 514], *val.read().await);
+        assert_eq!(Some([114, 514]), *val.read().await);
     })
 }
 
@@ -123,7 +123,10 @@ fn buf_save_load() {
 
             let chunk = world.chunk_buf_of_pos_or_load(pos).await.unwrap();
             let data = chunk.data.read().await;
-            assert_eq!(*data.iter().next().unwrap().1.read().await, [114, 514]);
+            assert_eq!(
+                *data.iter().next().unwrap().1.read().await,
+                Some([114, 514])
+            );
         }
     })
 }

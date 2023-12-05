@@ -50,7 +50,7 @@ enum LoadMethod<'w, T, const DIMS: usize> {
     Mem {
         chunk: Arc<Chunk<T, DIMS>>,
         guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
-        lock: &'w RwLock<T>,
+        lock: &'w RwLock<Option<T>>,
     },
 
     /// Decode data from bytes.
@@ -68,14 +68,14 @@ enum LazyInner<'w, T, const DIMS: usize> {
 struct RefArc<'w, T, const DIMS: usize> {
     _chunk: Arc<Chunk<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
-    guard: Option<RwLockReadGuard<'w, T>>,
+    guard: Option<RwLockReadGuard<'w, Option<T>>>,
 }
 
 #[derive(Debug)]
 struct RefMutArc<'w, T, const DIMS: usize> {
     _chunk: Arc<Chunk<T, DIMS>>,
     _guard: Arc<RwLockReadGuard<'w, ChunkData<T>>>,
-    guard: RwLockWriteGuard<'w, T>,
+    guard: RwLockWriteGuard<'w, Option<T>>,
 }
 
 impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
@@ -116,8 +116,12 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     /// if it's uninitialized.
     pub async fn get(&self) -> crate::Result<&T> {
         match self.value.get() {
-            Some(LazyInner::Ref(val)) => val.guard.as_deref().ok_or(crate::Error::ValueNotFound),
-            Some(LazyInner::RefMut(val)) => Ok(&val.guard),
+            Some(LazyInner::Ref(val)) => val
+                .guard
+                .as_deref()
+                .ok_or(crate::Error::ValueNotFound)
+                .and_then(|val| val.as_ref().ok_or(crate::Error::ValueMoved)),
+            Some(LazyInner::RefMut(val)) => val.guard.as_ref().ok_or(crate::Error::ValueMoved),
             Some(LazyInner::Direct(val)) => Ok(val),
             None => self.init().await,
         }
@@ -142,7 +146,11 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
                         }
                     })
                 }) {
-                    Ok(val.guard.as_deref().unwrap())
+                    val.guard
+                        .as_deref()
+                        .unwrap()
+                        .as_ref()
+                        .ok_or(crate::Error::ValueMoved)
                 } else {
                     unreachable!()
                 }
@@ -172,10 +180,28 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
                 &mut *(e as *mut LazyInner<'w, T, DIMS>)
             })
         {
-            Ok(&mut val.guard)
+            val.guard.as_mut().ok_or(crate::Error::ValueMoved)
         } else {
             self.init_mut().await
         }
+    }
+
+    pub async fn close(self) -> crate::Result<()> {
+        let mut this = self;
+        let (world, old_chunk) = (this.world, this.chunk);
+        let Some(LazyInner::RefMut(guard)) = this.value.get_mut() else {
+            return Ok(());
+        };
+        debug_assert!(guard.guard.is_some());
+        let val = guard.guard.as_mut().unwrap();
+
+        let chunk = world.chunk_buf_of_data_or_load(val).await?;
+        if chunk.pos() != &old_chunk {
+            let val = guard.guard.take().unwrap();
+            let _ = chunk.try_insert(val).await;
+        }
+
+        Ok(())
     }
 
     /// Initialize the inner value mutably.
@@ -213,7 +239,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         }
 
         if let Some(LazyInner::RefMut(val)) = self.value.get_mut() {
-            Ok(&mut val.guard)
+            val.guard.as_mut().ok_or(crate::Error::ValueMoved)
         } else {
             unreachable!()
         }
@@ -240,7 +266,8 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         type Guard<'a, T> = RwLockReadGuard<'a, super::ChunkData<T>>;
         // SAFETY: wrapping lifetime to 'w.
         let guard: Arc<Guard<'w, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
-        let lock = &*(guard.get(&self.id).ok_or(crate::Error::ValueNotFound)? as *const RwLock<T>);
+        let lock =
+            &*(guard.get(&self.id).ok_or(crate::Error::ValueNotFound)? as *const RwLock<Option<T>>);
 
         if let Some(LazyInner::Ref(val)) = self.value.get_mut() {
             val.guard = None;
@@ -486,7 +513,7 @@ enum ChunkFromMemIterMapInteract<'a, T> {
     /// the iterator will only iterate these hinted values,
     /// so that other unneeded values will not be iterated.
     Hint(ArcSliceIter<u64>),
-    Iter(btree_map::Iter<'a, u64, RwLock<T>>),
+    Iter(btree_map::Iter<'a, u64, RwLock<Option<T>>>),
 }
 
 #[derive(Debug)]

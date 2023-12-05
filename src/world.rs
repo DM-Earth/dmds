@@ -22,7 +22,10 @@ use self::select::{PosBox, Shape};
 // See #43408 (rust-lang/rust).
 
 pub type Pos<const DIMS: usize> = [usize; DIMS];
-type ChunkData<T> = BTreeMap<u64, RwLock<T>>;
+type ChunkData<T> = BTreeMap<u64, RwLock<DataInner<T>>>;
+
+/// If the data not exists, then is was moved.
+type DataInner<T> = Option<T>;
 
 /// A buffered chunk storing data in memory.
 ///
@@ -74,7 +77,7 @@ impl<T, const DIMS: usize> Chunk<T, DIMS> {
     ///
     /// Returns the removed data if it exists.
     pub async fn remove(&self, id: u64) -> Option<T> {
-        self.data.write().await.remove(&id).map(|d| {
+        self.data.write().await.remove(&id).and_then(|d| {
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             d.into_inner()
@@ -97,7 +100,10 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 
         let chunk_data_read = self.data.read().await;
         for data in chunk_data_read.iter() {
-            let data_read = data.1.read().await;
+            let data_read_guard = data.1.read().await;
+            let Some(data_read) = data_read_guard.as_ref() else {
+                continue;
+            };
             debug_assert_eq!(*data.0, data_read.dim(0), "data id should be immutable");
             buf.put_u64(*data.0);
             for dim_i in 1..T::DIMS {
@@ -138,8 +144,8 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         self.data
             .write()
             .await
-            .insert(vals[0], RwLock::new(data))
-            .map(RwLock::into_inner)
+            .insert(vals[0], RwLock::new(Some(data)))
+            .and_then(RwLock::into_inner)
     }
 
     /// Insert the given data to this chunk buffer.
@@ -165,7 +171,7 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
         } else {
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            w.insert(vals[0], RwLock::new(data));
+            w.insert(vals[0], RwLock::new(Some(data)));
             Ok(())
         }
     }
@@ -189,6 +195,38 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 }
 
 /// A world containing chunks, in multi-dimensions.
+///
+/// This is what a 3-dimensional world looks
+/// like, in concept:
+///
+/// ```txt
+///               ...
+///    /    /    /    /    /    /
+///   /____/____/____/____/____/
+///  /    /    /    /    /    /|/
+/// ┌────┬────┬────┬────┬────┐ |
+/// │Chunk    │    │    │    │/|/
+/// ├────┼────┼────┼────┼────┤ |  ...
+/// │    │    │    │    │    │/|/
+/// ├────┼────┼────┼────┼────┤ |
+/// │    │    │    │    │    │/|/  Dim2
+/// ├────┼────┼────┼────┼────┤ |   ^ Dim1
+/// │    │    │    │    │    │/    |/
+/// └────┴────┴────┴────┴────┘     /--> Dim0
+/// ```
+///
+/// In this view, each cube is a chunk, and each chunk
+/// contains data items as sequences.
+/// See [`Chunk`] for more information.
+///
+/// # Dimensions
+///
+/// There should be at least 1 dimension in a world, and there is
+/// no technically limit of count of dimensions. So it can be 1, 2, 3, 4, ...
+///
+/// Each data items contains values of each dimension, like a position.
+/// The value of the first (zero) dimension is the actual position, or and identifier,
+/// of a data item. It is fixed, and should not be conflicted.
 #[derive(Debug)]
 pub struct World<T, const DIMS: usize, Io: IoHandle> {
     /// Buffered chunks of this world, for modifying data.
@@ -397,7 +435,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                 let _ = item.init().await;
                 let id = item.id();
                 if let Some(e) = item.into_inner() {
-                    items.insert(id, RwLock::new(e));
+                    items.insert(id, RwLock::new(Some(e)));
                 }
             }
         }
