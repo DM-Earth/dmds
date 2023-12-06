@@ -21,8 +21,9 @@ impl DimMapping {
         let diff = *range.end() - *range.start() + 1;
         let spacing = elements_per_chunk as u64;
 
-        assert!(
-            diff % spacing == 0,
+        assert_eq!(
+            diff % spacing,
+            0,
             "length of range [{}, {}] is not divisible by {spacing}.",
             range.start(),
             range.end()
