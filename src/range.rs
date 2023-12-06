@@ -18,7 +18,7 @@ impl DimMapping {
     /// Panics if the given `range` is not divisible by `elements_per_chunk`.
     pub fn new(range_bounds: impl RangeBounds<u64>, elements_per_chunk: usize) -> Self {
         let range: RangeInclusive<u64> = Wrapper(range_bounds).into();
-        let diff = *range.end() - *range.start() + 1;
+        let diff = (*range.end() - *range.start()) + 1;
         let spacing = elements_per_chunk as u64;
 
         assert_eq!(
