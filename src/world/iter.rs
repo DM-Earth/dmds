@@ -268,10 +268,11 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
         let chunk = self.world.load_chunk_buf(self.chunk).await;
         // Guard of a chunk.
         type Guard<'a, T> = RwLockReadGuard<'a, super::ChunkData<T>>;
+
         // SAFETY: wrapping lifetime to 'w.
         let guard: Arc<Guard<'w, T>> = Arc::new(std::mem::transmute(chunk.data.read().await));
-        let lock =
-            &*(guard.get(&self.id).ok_or(crate::Error::ValueNotFound)? as *const RwLock<Option<T>>);
+        let lock: &'w RwLock<Option<T>> =
+            std::mem::transmute(guard.get(&self.id).ok_or(crate::Error::ValueNotFound)?);
 
         if let Some(LazyInner::Ref(val)) = self.value.get_mut() {
             val.guard = None;
