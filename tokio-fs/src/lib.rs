@@ -6,10 +6,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use dashmap::DashSet;
 use dmds::IoHandle;
-use tokio::{fs::File, io::BufReader};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, BufReader},
+};
 
 #[cfg(test)]
 mod tests;
@@ -38,7 +41,7 @@ impl IoHandle for FsHandle {
     async fn read_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Read<'_>> {
+    ) -> std::io::Result<(u32, Self::Read<'_>)> {
         let path = self.path(&pos);
         let result = File::open(&path).await;
 
@@ -50,11 +53,17 @@ impl IoHandle for FsHandle {
                 self.invalid_chunks.insert(Box::new(pos));
             }
         }
+        let mut file = BufReader::new(result?);
+        let mut buf = [0_u8; 4];
+        file.read_exact(&mut &mut buf[..]).await?;
 
-        Ok(FsReader {
-            _handle: self,
-            file: BufReader::new(result?),
-        })
+        Ok((
+            u32::from_be_bytes(buf),
+            FsReader {
+                _handle: self,
+                file,
+            },
+        ))
     }
 }
 
@@ -76,6 +85,7 @@ impl FsHandle {
         chunk: &dmds::Chunk<T, DIMS>,
     ) -> std::io::Result<()> {
         let mut buf = BytesMut::new();
+        buf.put_u32(T::VERSION);
         chunk.write_buf(&mut buf).await?;
         let buf = buf.freeze();
 
