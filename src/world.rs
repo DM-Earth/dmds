@@ -32,7 +32,8 @@ type DataInner<T> = Option<T>;
 /// # Data layout
 ///
 /// A chunk should be saved in bytes, so all items should be saved in bytes.
-/// A saved chunk is a combination of bytes of items, so it should be `[item0][item1][item2]..` .
+/// A saved chunk is a combination of bytes of items,
+/// so it should be `[item0][item1][item2]..` .
 ///
 /// Layout of an item should be like this (for example if we have 2+ dimensions):
 ///
@@ -283,46 +284,16 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         self.chunks_limit = limit.unwrap_or_default()
     }
 
-    /// Select from a value in the given dimension.
-    pub fn select(&self, dim: usize, value: u64) -> Select<'_, T, DIMS, Io> {
+    /// Select chunks in the given dimension.
+    pub fn select(&self, dim: usize, selector: impl SelectBounds) -> Select<'_, T, DIMS, Io> {
         const TEMP_RANGE: RangeInclusive<usize> = 0..=0;
         let mut arr = [TEMP_RANGE; DIMS];
 
-        for (index, (value1, map)) in arr.iter_mut().zip(self.mappings.iter()).enumerate() {
+        let range = selector.into_range_bounds();
+
+        for (index, (value, dmap)) in arr.iter_mut().zip(self.mappings.iter()).enumerate() {
             if index == dim {
-                if let Ok(v) = map.chunk_of(value) {
-                    *value1 = v..=v
-                } else {
-                    return Select {
-                        world: self,
-                        shape: Shape::None,
-                        hint: vec![],
-                    };
-                }
-            } else {
-                *value1 = map.chunk_range()
-            }
-        }
-
-        Select {
-            world: self,
-            shape: Shape::Single(PosBox::new(arr)),
-            hint: vec![],
-        }
-    }
-
-    /// Select a range of chunks in the given dimension.
-    pub fn range_select(
-        &self,
-        dim: usize,
-        range: impl RangeBounds<u64> + Clone,
-    ) -> Select<'_, T, DIMS, Io> {
-        const TEMP_RANGE: RangeInclusive<usize> = 0..=0;
-        let mut arr = [TEMP_RANGE; DIMS];
-
-        for (index, value) in arr.iter_mut().enumerate() {
-            if index == dim {
-                if let Ok(v) = self.mappings[index].chunks_of(range.clone()) {
+                if let Ok(v) = dmap.chunks_of(range.clone()) {
                     *value = v
                 } else {
                     return Select {
@@ -332,7 +303,7 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
                     };
                 }
             } else {
-                *value = self.mappings[index].chunk_range()
+                *value = dmap.chunk_range()
             }
         }
 
@@ -346,7 +317,7 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     /// Select all chunks in this world.
     #[inline]
     pub fn select_all(&self) -> Select<'_, T, DIMS, Io> {
-        self.range_select(0, ..)
+        self.select(0, ..)
     }
 
     #[inline]
@@ -382,6 +353,50 @@ impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     pub fn io_handle(&self) -> &Io {
         &self.io_handle
     }
+}
+
+/// Types that can be used for selecting chunks.
+pub trait SelectBounds {
+    /// Produced raw bounds type.
+    type Bounds: RangeBounds<u64> + Clone;
+
+    /// Make this value into target bounds.
+    fn into_range_bounds(self) -> Self::Bounds;
+}
+
+impl SelectBounds for u64 {
+    type Bounds = RangeInclusive<u64>;
+
+    #[inline]
+    fn into_range_bounds(self) -> Self::Bounds {
+        self..=self
+    }
+}
+
+// `u64` may implement `RangeBounds` in the future.
+
+macro_rules! impl_select_bounds_for_range {
+    ($($t:ty),*$(,)?) => {
+        $(
+            impl SelectBounds for $t {
+                type Bounds = Self;
+                #[inline]
+                fn into_range_bounds(self) -> Self::Bounds {
+                    self
+                }
+            }
+        )*
+    };
+}
+
+impl_select_bounds_for_range! {
+    (std::ops::Bound<u64>, std::ops::Bound<u64>),
+    std::ops::Range<u64>,
+    std::ops::RangeFrom<u64>,
+    std::ops::RangeFull,
+    std::ops::RangeInclusive<u64>,
+    std::ops::RangeTo<u64>,
+    std::ops::RangeToInclusive<u64>,
 }
 
 /// Iterator of chunk buffers returned by [`World::chunks`].
@@ -560,21 +575,10 @@ pub struct Select<'w, T, const DIMS: usize, Io: IoHandle> {
 }
 
 impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
-    /// Select a range of chunks in the given dimension,
+    /// Select chunks from given value in the given dimension,
     /// and intersect with current selection.
     #[inline]
-    pub fn range_and(self, dim: usize, range: impl RangeBounds<u64> + Clone) -> Self {
-        let mut this = self;
-        if let Shape::Single(v) = this.world.range_select(dim, range).shape {
-            this.shape.intersect(v)
-        }
-        this
-    }
-
-    /// Select from a value in the given dimension,
-    /// and intersect with current selection.
-    #[inline]
-    pub fn and(self, dim: usize, value: u64) -> Self {
+    pub fn and(self, dim: usize, value: impl SelectBounds) -> Self {
         let mut this = self;
         if let Shape::Single(v) = this.world.select(dim, value).shape {
             this.shape.intersect(v)
@@ -582,19 +586,10 @@ impl<T, const DIMS: usize, Io: IoHandle> Select<'_, T, DIMS, Io> {
         this
     }
 
-    /// Select a range of chunks in the given dimension,
+    /// Select chunks from given value in the given dimension,
     /// and combine with current selection.
     #[inline]
-    pub fn range_plus(self, dim: usize, range: impl RangeBounds<u64> + Clone) -> Self {
-        let mut this = self;
-        this.shape += this.world.range_select(dim, range).shape;
-        this
-    }
-
-    /// Select from a value in the given dimension,
-    /// and combine with current selection.
-    #[inline]
-    pub fn plus(self, dim: usize, value: u64) -> Self {
+    pub fn plus(self, dim: usize, value: impl SelectBounds) -> Self {
         let mut this = self;
         this.shape += this.world.select(dim, value).shape;
         this

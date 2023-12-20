@@ -151,7 +151,7 @@ fn select() {
         assert!(world.insert([10, 39]).await.is_ok());
         assert!(world.insert([99, 20]).await.is_ok());
 
-        let selection = world.range_select(0, ..);
+        let selection = world.select_all();
         let mut iter = selection.iter();
 
         let a = *iter.next().await.unwrap().unwrap().get().await.unwrap();
@@ -227,7 +227,7 @@ fn io_modify() {
                 mem.clone(),
             );
 
-            let selection = world.range_select(0, ..);
+            let selection = world.select_all();
             let mut iter = selection.iter();
 
             let mut lazy = iter.next().await.unwrap().unwrap();
@@ -257,7 +257,7 @@ fn buf_modify() {
 
         assert!(world.insert([114, 514]).await.is_ok());
 
-        let selection = world.range_select(0, ..);
+        let selection = world.select_all();
         let mut iter = selection.iter();
 
         let mut lazy = iter.next().await.unwrap().unwrap();
