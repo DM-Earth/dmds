@@ -10,7 +10,7 @@ use crate::IoHandle;
 /// This is only for testing.
 #[derive(Debug, Default)]
 pub struct MemStorage {
-    chunks: async_lock::RwLock<HashMap<String, Vec<u8>>>,
+    chunks: async_lock::RwLock<HashMap<String, (u32, Vec<u8>)>>,
 }
 
 impl MemStorage {
@@ -23,6 +23,7 @@ impl MemStorage {
     /// Writes a chunk to this storage.
     pub async fn write_chunk<const DIMS: usize>(
         &self,
+        data_version: u32,
         pos: [usize; DIMS],
     ) -> std::io::Result<Writer<'_>> {
         let mut chunk = String::new();
@@ -33,7 +34,7 @@ impl MemStorage {
         chunk.pop();
 
         let mut write = self.chunks.write().await;
-        write.insert(chunk.to_owned(), vec![]);
+        write.insert(chunk.to_owned(), (data_version, vec![]));
 
         Ok(Writer {
             chunks: write,
@@ -49,7 +50,7 @@ impl IoHandle for MemStorage {
     async fn read_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Read<'_>> {
+    ) -> std::io::Result<(u32, Self::Read<'_>)> {
         let mut chunk = String::new();
         for dim in pos.iter() {
             chunk.push_str(&dim.to_string());
@@ -65,18 +66,21 @@ impl IoHandle for MemStorage {
             ));
         }
 
-        Ok(Reader {
-            chunks: read,
-            chunk,
-            ptr: 0,
-        })
+        Ok((
+            read[&chunk].0,
+            Reader {
+                chunks: read,
+                chunk,
+                ptr: 0,
+            },
+        ))
     }
 }
 
 /// A reader for [`MemStorage`].
 #[derive(Debug)]
 pub struct Reader<'a> {
-    chunks: async_lock::RwLockReadGuard<'a, HashMap<String, Vec<u8>>>,
+    chunks: async_lock::RwLockReadGuard<'a, HashMap<String, (u32, Vec<u8>)>>,
     chunk: String,
     ptr: usize,
 }
@@ -89,7 +93,7 @@ impl AsyncRead for Reader<'_> {
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        let mut chunk = &this.chunks.get(&this.chunk).unwrap()[this.ptr..];
+        let mut chunk = &this.chunks.get(&this.chunk).unwrap().1[this.ptr..];
         let res = futures_lite::AsyncRead::poll_read(std::pin::Pin::new(&mut chunk), cx, buf);
         if let std::task::Poll::Ready(Ok(len)) = res {
             this.ptr += len;
@@ -104,7 +108,7 @@ impl AsyncRead for Reader<'_> {
         bufs: &mut [std::io::IoSliceMut<'_>],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        let mut chunk = &this.chunks.get(&this.chunk).unwrap()[..];
+        let mut chunk = &this.chunks.get(&this.chunk).unwrap().1[..];
         futures_lite::AsyncRead::poll_read_vectored(std::pin::Pin::new(&mut chunk), cx, bufs)
     }
 }
@@ -112,7 +116,7 @@ impl AsyncRead for Reader<'_> {
 /// A writer for [`MemStorage`].
 #[derive(Debug)]
 pub struct Writer<'a> {
-    chunks: async_lock::RwLockWriteGuard<'a, HashMap<String, Vec<u8>>>,
+    chunks: async_lock::RwLockWriteGuard<'a, HashMap<String, (u32, Vec<u8>)>>,
     chunk: String,
 }
 
@@ -125,7 +129,7 @@ impl AsyncWrite for Writer<'_> {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
         futures_lite::AsyncWrite::poll_write(
-            std::pin::Pin::new(this.chunks.get_mut(&this.chunk).unwrap()),
+            std::pin::Pin::new(&mut this.chunks.get_mut(&this.chunk).unwrap().1),
             cx,
             buf,
         )
@@ -139,7 +143,7 @@ impl AsyncWrite for Writer<'_> {
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
         futures_lite::AsyncWrite::poll_write_vectored(
-            std::pin::Pin::new(this.chunks.get_mut(&this.chunk).unwrap()),
+            std::pin::Pin::new(&mut this.chunks.get_mut(&this.chunk).unwrap().1),
             cx,
             bufs,
         )
@@ -152,7 +156,7 @@ impl AsyncWrite for Writer<'_> {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
         futures_lite::AsyncWrite::poll_flush(
-            std::pin::Pin::new(this.chunks.get_mut(&this.chunk).unwrap()),
+            std::pin::Pin::new(&mut this.chunks.get_mut(&this.chunk).unwrap().1),
             cx,
         )
     }
@@ -164,7 +168,7 @@ impl AsyncWrite for Writer<'_> {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
         futures_lite::AsyncWrite::poll_close(
-            std::pin::Pin::new(this.chunks.get_mut(&this.chunk).unwrap()),
+            std::pin::Pin::new(&mut this.chunks.get_mut(&this.chunk).unwrap().1),
             cx,
         )
     }

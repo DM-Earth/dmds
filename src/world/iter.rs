@@ -54,7 +54,7 @@ enum LoadMethod<'w, T, const DIMS: usize> {
     },
 
     /// Decode data from bytes.
-    Io(bytes::Bytes),
+    Io { version: u32, bin: bytes::Bytes },
 }
 
 #[derive(Debug)]
@@ -155,9 +155,10 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
                     unreachable!()
                 }
             }
-            LoadMethod::Io(ref bytes) => {
+            LoadMethod::Io { version, ref bin } => {
                 let _ = self.value.set(LazyInner::Direct(
-                    T::decode(self.dims.get().unwrap(), bytes.clone()).map_err(crate::Error::Io)?,
+                    T::decode(version, self.dims.get().unwrap(), bin.clone())
+                        .map_err(crate::Error::Io)?,
                 ));
 
                 if let Some(LazyInner::Direct(val)) = self.value.get() {
@@ -172,7 +173,8 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     /// Gets the inner value mutably or initialize it
     /// if it's uninitialized.
     ///
-    /// Make sure to call [`Self::close`] after modification.
+    /// Make sure to call [`Self::close`] after modification
+    /// related to dimensional values.
     pub async fn get_mut(&mut self) -> crate::Result<&mut T> {
         if let Some(LazyInner::RefMut(val)) = self
             .value
@@ -237,7 +239,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
                 }
                 chunk.writes.fetch_add(1, atomic::Ordering::AcqRel);
             }
-            LoadMethod::Io(_) => unsafe {
+            LoadMethod::Io { .. } => unsafe {
                 self.load_chunk().await?;
             },
         }
@@ -302,7 +304,7 @@ impl<'w, T: Data, const DIMS: usize, Io: IoHandle> Lazy<'w, T, DIMS, Io> {
     }
 }
 
-type IoReadFuture<'a, Io> = dyn std::future::Future<Output = futures_lite::io::Result<<Io as IoHandle>::Read<'a>>>
+type IoReadFuture<'a, Io> = dyn std::future::Future<Output = std::io::Result<(u32, <Io as IoHandle>::Read<'a>)>>
     + Send
     + 'a;
 
@@ -316,6 +318,7 @@ enum ChunkFromIoIter<'a, T, const DIMS: usize, Io: IoHandle> {
         world: &'a World<T, DIMS, Io>,
         chunk: [usize; DIMS],
         read: Io::Read<'a>,
+        version: u32,
         progress: InProgress<DIMS>,
     },
 }
@@ -379,6 +382,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> ChunkFromIoIter<'a, T, DIMS, 
                 progress,
                 chunk,
                 world,
+                version,
             } => match progress {
                 InProgress::Dims(dims) => {
                     for dim in &mut *dims {
@@ -441,7 +445,10 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> ChunkFromIoIter<'a, T, DIMS, 
                                 Some(Poll::Ready(Some(Ok(Lazy {
                                     id,
                                     dims: lock,
-                                    method: LoadMethod::Io(buf),
+                                    method: LoadMethod::Io {
+                                        bin: buf,
+                                        version: *version,
+                                    },
                                     value: OnceLock::new(),
                                     chunk: *chunk,
                                     world,
@@ -462,20 +469,22 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> ChunkFromIoIter<'a, T, DIMS, 
                 chunk,
                 world,
             } => {
-                *this = Self::InProgress {
-                    read: match ready_opt!(future.as_mut().poll(cx)) {
-                        Ok(val) => val,
-                        Err(err) => {
-                            return if err.kind() == std::io::ErrorKind::NotFound {
-                                Some(Poll::Ready(None))
-                            } else {
-                                Some(Poll::Ready(Some(Err(err))))
-                            }
+                let (version, read) = match ready_opt!(future.as_mut().poll(cx)) {
+                    Ok(val) => val,
+                    Err(err) => {
+                        return if err.kind() == std::io::ErrorKind::NotFound {
+                            Some(Poll::Ready(None))
+                        } else {
+                            Some(Poll::Ready(Some(Err(err))))
                         }
-                    },
+                    }
+                };
+                *this = Self::InProgress {
+                    read,
                     progress: InProgress::Dims([Default::default(); DIMS]),
                     chunk: *chunk,
                     world: *world,
+                    version,
                 };
 
                 None
