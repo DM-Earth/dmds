@@ -98,7 +98,7 @@ fn buf_save_load() {
             assert!(w_read.write_buf(&mut bytes).await.is_ok());
 
             assert!(mem
-                .write_chunk(pos)
+                .write_chunk(crate::ARRAY_VERSION, pos)
                 .await
                 .unwrap()
                 .write_all(&bytes)
@@ -204,7 +204,7 @@ fn io_modify() {
             assert!(w_read.write_buf(&mut bytes).await.is_ok());
 
             assert!(mem
-                .write_chunk(pos)
+                .write_chunk(crate::ARRAY_VERSION, pos)
                 .await
                 .unwrap()
                 .write_all(&bytes)

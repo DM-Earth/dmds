@@ -27,35 +27,42 @@ pub trait Data: Sized + Send + Sync + Unpin {
     /// Count of dimensions.
     const DIMS: usize;
 
+    /// The current version of this data type.
+    const VERSION: u32;
+
     /// Gets the value of required dimension.
     ///
     /// Dimension index starts from 0, which should be
     /// a unique data such as the only id.
     fn dim(&self, dim: usize) -> u64;
 
-    /// Decode this type from given `Read` and dimensional values.
-    fn decode<B: bytes::Buf>(dims: &[u64], buf: B) -> std::io::Result<Self>;
+    /// Decode this type from given `Read` and dimensional values,
+    /// in the given data version.
+    fn decode<B: bytes::Buf>(version: u32, dims: &[u64], buf: B) -> std::io::Result<Self>;
 
-    /// Encode this type into bytes buffer.
+    /// Encode this type into bytes buffer, in
+    /// latest data version.
     ///
-    /// To implementors: You don't need to encode dimensional values.
-    /// They will be encoded automatically.
+    /// _To implementors: You don't need to encode dimensional values.
+    /// They will be encoded automatically._
     fn encode<B: bytes::BufMut>(&self, buf: B) -> std::io::Result<()>;
 }
 
+const ARRAY_VERSION: u32 = 0;
+
 impl<const DIMS: usize> Data for [u64; DIMS] {
     const DIMS: usize = DIMS;
+    const VERSION: u32 = ARRAY_VERSION;
 
     #[inline]
     fn dim(&self, dim: usize) -> u64 {
         self[dim]
     }
 
-    fn decode<B: bytes::Buf>(dims: &[u64], _buf: B) -> std::io::Result<Self> {
+    #[inline]
+    fn decode<B: bytes::Buf>(_version: u32, dims: &[u64], _buf: B) -> std::io::Result<Self> {
         let mut this = [0; DIMS];
-        for (t, d) in this.iter_mut().zip(dims.iter()) {
-            *t = *d
-        }
+        this.copy_from_slice(dims);
         Ok(this)
     }
 
@@ -83,11 +90,11 @@ pub trait IoHandle: Send + Sync {
         true
     }
 
-    /// Gets reader for given chunk position.
+    /// Gets reader and data version for given chunk position.
     async fn read_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<Self::Read<'_>>;
+    ) -> std::io::Result<(u32, Self::Read<'_>)>;
 }
 
 impl<P, T> IoHandle for P
@@ -111,7 +118,7 @@ where
         pos: [usize; DIMS],
     ) -> ::core::pin::Pin<
         Box<
-            dyn ::core::future::Future<Output = std::io::Result<Self::Read<'_>>>
+            dyn ::core::future::Future<Output = std::io::Result<(u32, Self::Read<'_>)>>
                 + ::core::marker::Send
                 + 'async_trait,
         >,
