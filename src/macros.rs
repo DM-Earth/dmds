@@ -13,7 +13,7 @@
 /// ```
 /// # use dmds::{*, mem_io_handle::*};
 /// let world: World<[u64; 2], 2, _> = world! {
-///     MemStorage::new(), 16 | ..1024, 8 | ..128
+///     MemStorage::new(), 16 => ..1024, 8 => ..128
 /// };
 /// # let _ = world;
 /// ```
@@ -24,7 +24,10 @@
 /// dimension count of data are different.
 #[macro_export]
 macro_rules! world {
-    ($io:expr, $($ipc:literal | $dr:expr),+) => {
-        $crate::World::new([$($crate::Dim{range:$dr,items_per_chunk:$ipc},)+], $io)
+    ($io:expr, $($ipc:literal | $dr:expr),+$(,)?) => {
+        $crate::world!($io, $($ipc => $dr),*)
+    };
+    ($io:expr, $($ipc:expr => $dr:expr),+) => {
+        $crate::World::new([$($crate::Dim::new($ipc, $dr),)+], $io)
     };
 }

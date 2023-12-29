@@ -202,7 +202,6 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 ///
 /// ```txt
 ///               ...
-///    /    /    /    /    /    /
 ///   /____/____/____/____/____/
 ///  /    /    /    /    /    /|/
 /// ┌────┬────┬────┬────┬────┐ |
@@ -211,7 +210,7 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
 /// │    │    │    │    │    │/|/
 /// ├────┼────┼────┼────┼────┤ |
 /// │    │    │    │    │    │/|/  Dim2
-/// ├────┼────┼────┼────┼────┤ |   ^ Dim1
+/// ├────┼────┼────┼────┼────┤ |   ^ ┐Dim1
 /// │    │    │    │    │    │/    |/
 /// └────┴────┴────┴────┴────┘     /--> Dim0
 /// ```
@@ -275,6 +274,19 @@ pub struct Dim<R> {
 
     /// Count of items per chunk in this dimension.
     pub items_per_chunk: usize,
+}
+
+impl Dim<RangeInclusive<u64>> {
+    #[inline]
+    pub fn new<R>(items_per_chunk: usize, range: R) -> Self
+    where
+        R: RangeBounds<u64>,
+    {
+        Self {
+            range: crate::range::Wrapper(range).into(),
+            items_per_chunk,
+        }
+    }
 }
 
 impl<T, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
