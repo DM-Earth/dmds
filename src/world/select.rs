@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     iter::Sum,
     ops::{Add, AddAssign, RangeInclusive},
 };
@@ -16,7 +17,7 @@ pub struct PosBox<const DIMS: usize> {
 
 #[derive(Debug)]
 pub struct PosBoxIter<'a, const DIMS: usize> {
-    pos_box: &'a PosBox<DIMS>,
+    pos_box: Cow<'a, PosBox<DIMS>>,
     next: Pos<DIMS>,
     done: bool,
 }
@@ -106,11 +107,11 @@ impl<const DIMS: usize> PosBox<DIMS> {
         Some(Self::new(ranges))
     }
 
-    /// Returen an iterator of this box.
+    /// Returns an iterator of this box.
     #[inline]
     fn iter(&self) -> PosBoxIter<'_, DIMS> {
         PosBoxIter {
-            pos_box: self,
+            pos_box: Cow::Borrowed(self),
             next: self.start,
             done: false,
         }
@@ -289,6 +290,7 @@ impl<const DIMS: usize> Shape<DIMS> {
         }
     }
 
+    #[inline]
     pub fn iter(&self) -> ShapeIter<'_, DIMS> {
         ShapeIter {
             shape: self,
