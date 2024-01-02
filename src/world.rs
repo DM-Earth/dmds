@@ -268,17 +268,17 @@ pub struct World<T, const DIMS: usize, Io: IoHandle> {
 
 /// Describes information of a single dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Dim<R> {
+pub struct Dim<R, C = usize> {
     /// Range of values in this dimension.
     pub range: R,
 
     /// Count of items per chunk in this dimension.
-    pub items_per_chunk: usize,
+    pub items_per_chunk: C,
 }
 
-impl Dim<RangeInclusive<u64>> {
+impl<C> Dim<RangeInclusive<u64>, C> {
     #[inline]
-    pub fn new<R>(items_per_chunk: usize, range: R) -> Self
+    pub fn new<R>(items_per_chunk: C, range: R) -> Self
     where
         R: RangeBounds<u64>,
     {
@@ -430,11 +430,15 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
     ///
     /// # Panics
     ///
-    /// Panics when count of given dimensions and the
+    /// - Panics when count of given dimensions and the
     /// dimension count of data are different.
-    pub fn new<R>(dims: [Dim<R>; DIMS], io_handle: Io) -> Self
+    /// - Panics when the given `items per chunk` values could
+    /// not be converted into `u64` successfully.
+    pub fn new<R, C>(dims: [Dim<R, C>; DIMS], io_handle: Io) -> Self
     where
         R: std::ops::RangeBounds<u64>,
+        u64: TryFrom<C>,
+        <u64 as TryFrom<C>>::Error: std::error::Error,
     {
         assert_eq!(
             T::DIMS,
@@ -446,9 +450,9 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         Self {
             chunks_buf: DashMap::new(),
             chunks_limit: 24,
-            mappings: Arc::new(
-                dims.map(|value| DimMapping::new(value.range, value.items_per_chunk)),
-            ),
+            mappings: Arc::new(dims.map(|value| {
+                DimMapping::new(value.range, u64::try_from(value.items_per_chunk).unwrap())
+            })),
             io_handle,
         }
     }
