@@ -7,7 +7,7 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use async_lock::RwLock;
+use async_lock::{Mutex, RwLock};
 use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
 use futures_lite::StreamExt;
@@ -55,7 +55,7 @@ pub struct Chunk<T, const DIMS: usize> {
 
     /// `Mutex` indicates whether a task is currently
     /// writing this chunk.
-    lock_w: std::sync::Mutex<()>,
+    lock_w: Mutex<()>,
 
     mappings: Arc<[DimMapping; DIMS]>,
     pos: Pos<DIMS>,
@@ -95,7 +95,7 @@ impl<T: Data, const DIMS: usize> Chunk<T, DIMS> {
     /// For the data layout, see [`World`].
     pub async fn write_buf<B: BufMut>(&self, mut buf: B) -> std::io::Result<()> {
         // Obtain the write lock guard
-        let Ok(_) = self.lock_w.try_lock() else {
+        let Some(_g) = self.lock_w.try_lock() else {
             return Ok(());
         };
 
@@ -501,7 +501,7 @@ impl<T: Data, const DIMS: usize, Io: IoHandle> World<T, DIMS, Io> {
         let arc = Arc::new(Chunk {
             data: RwLock::new(items),
             writes: AtomicUsize::new(0),
-            lock_w: std::sync::Mutex::new(()),
+            lock_w: Mutex::new(()),
             mappings: self.mappings.clone(),
             pos,
         });

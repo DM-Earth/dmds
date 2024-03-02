@@ -55,7 +55,7 @@ impl IoHandle for FsHandle {
         }
         let mut file = BufReader::new(result?);
         let mut buf = [0_u8; 4];
-        file.read_exact(&mut &mut buf[..]).await?;
+        file.read_exact(&mut buf).await?;
 
         Ok((
             u32::from_be_bytes(buf),
@@ -202,11 +202,11 @@ impl<T: dmds::Data + Send + 'static, const DIMS: usize> Drop for ShutdownHandle<
 /// This function will write all dirty chunk buffers to the file system.
 /// A [`ShutdownHandle`] will be created to write all the dirty chunks
 /// when the daemon is ended.
-pub async fn daemon<T: dmds::Data, const DIMS: usize>(
+pub async fn daemon<T, const DIMS: usize>(
     world: Arc<dmds::World<T, DIMS, FsHandle>>,
     write_interval: Duration,
 ) where
-    T: Send + 'static,
+    T: dmds::Data + Send + 'static,
 {
     const LEAST_WRITES: usize = 1;
 
