@@ -1,6 +1,6 @@
 [package]
 name = "dmds"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["JieningYu <jiening.yu@outlook.com>"]
 description = "Multidimensional database implemented in Rust"
@@ -17,9 +17,9 @@ maintenance = { status = "actively-developed" }
 
 [dependencies]
 thiserror = "1.0"
-async-lock = "3.1"
-futures-lite = "2.0"
-bytes = "1.5"
+async-lock = "3.3"
+futures-lite = "2.3"
+bytes = "1.6"
 dashmap = "5.5"
 
 [workspace]
