@@ -2,13 +2,7 @@
 ///
 /// See [`crate::World::new`] for more information.
 ///
-/// # Syntax
-///
-/// ```ignored
-/// $io_handler, $($items_per_chunk | $dimension_value_range),+
-/// ```
-///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # use dmds::{*, mem_io_handle::*};
@@ -27,7 +21,7 @@ macro_rules! world {
     ($io:expr, $($ipc:literal | $dr:expr),+$(,)?) => {
         $crate::world!($io, $($ipc => $dr),*)
     };
-    ($io:expr, $($ipc:expr => $dr:expr),+) => {
+    ($io:expr, $($ipc:expr => $dr:expr),+$(,)?) => {
         $crate::World::new([$($crate::Dim::new($ipc, $dr),)+], $io)
     };
 }

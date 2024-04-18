@@ -1,21 +1,21 @@
-/// Module containing range mappings.
+//! Multi-dimensional database implemented in Rust.
+
+#![warn(missing_docs)]
+
 mod range;
 
 /// Module containing in-memory IO handlers for testing.
 pub mod mem_io_handle;
 
 mod macros;
-/// Module containing world implementation.
 mod world;
 
-/// Module containing tests.
 #[cfg(test)]
 mod tests;
 
 use std::ops::Deref;
 
-use async_trait::async_trait;
-use futures_lite::AsyncRead;
+use futures_lite::{AsyncRead, Future};
 
 pub use world::{iter::Iter, iter::Lazy, Chunk, Chunks, Dim, Select, World};
 
@@ -73,7 +73,6 @@ impl<const DIMS: usize> Data for [u64; DIMS] {
 }
 
 /// Trait representing IO handlers for dimensional worlds.
-#[async_trait]
 pub trait IoHandle: Send + Sync {
     /// Type of reader.
     type Read<'a>: AsyncRead + Unpin + Send + Sync + 'a
@@ -91,10 +90,10 @@ pub trait IoHandle: Send + Sync {
     }
 
     /// Gets reader and data version for given chunk position.
-    async fn read_chunk<const DIMS: usize>(
+    fn read_chunk<const DIMS: usize>(
         &self,
         pos: [usize; DIMS],
-    ) -> std::io::Result<(u32, Self::Read<'_>)>;
+    ) -> impl Future<Output = std::io::Result<(u32, Self::Read<'_>)>> + Send + Sync;
 }
 
 impl<P, T> IoHandle for P
@@ -109,24 +108,11 @@ where
         self.deref().hint_is_valid(pos)
     }
 
-    #[doc = " Gets reader for given chunk position."]
-    #[must_use]
-    #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
     #[inline]
-    fn read_chunk<'life0, 'async_trait, const DIMS: usize>(
-        &'life0 self,
+    fn read_chunk<const DIMS: usize>(
+        &self,
         pos: [usize; DIMS],
-    ) -> ::core::pin::Pin<
-        Box<
-            dyn ::core::future::Future<Output = std::io::Result<(u32, Self::Read<'_>)>>
-                + ::core::marker::Send
-                + 'async_trait,
-        >,
-    >
-    where
-        'life0: 'async_trait,
-        Self: 'async_trait,
-    {
+    ) -> impl Future<Output = std::io::Result<(u32, Self::Read<'_>)>> {
         self.deref().read_chunk(pos)
     }
 }
@@ -141,13 +127,19 @@ pub enum Error {
     #[error("requesting value not found")]
     ValueNotFound,
     /// Requesting value was moved to another chunk buffer.
+    ///
     /// This is usually due to the target data was not suitable
     /// in the chunk after its modification.
     #[error("requesting value was moved to another chunk buffer")]
     ValueMoved,
     /// Given value out of range.
     #[error("value {value} out of range [{}, {}]", range.0, range.1)]
-    ValueOutOfRange { range: (u64, u64), value: u64 },
+    ValueOutOfRange {
+        /// The expected range.
+        range: (u64, u64),
+        /// The value.
+        value: u64,
+    },
 }
 
 /// Type alias for result produced by this crate.

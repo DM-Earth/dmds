@@ -277,6 +277,8 @@ pub struct Dim<R, C = usize> {
 }
 
 impl<C> Dim<RangeInclusive<u64>, C> {
+    /// Creates a new [`Dim`] with [`RangeInclusive`] as the range type,
+    /// wrapping the given range bounds.
     #[inline]
     pub fn new<R>(items_per_chunk: C, range: R) -> Self
     where

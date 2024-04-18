@@ -736,7 +736,7 @@ impl<'a, T: Data, const DIMS: usize, Io: IoHandle> Iter<'a, T, DIMS, Io> {
             } else if self.world.io_handle.hint_is_valid(&pos) {
                 self.current = Some(ChunkIter::Io(ChunkFromIoIter::Pre {
                     world: self.world,
-                    future: self.world.io_handle.read_chunk(pos),
+                    future: self.world.io_handle.read_chunk(pos).boxed(),
                     chunk: pos,
                 }));
             } else {

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use async_trait::async_trait;
 use futures_lite::{AsyncRead, AsyncWrite};
 
 use crate::IoHandle;
@@ -43,7 +42,6 @@ impl MemStorage {
     }
 }
 
-#[async_trait]
 impl IoHandle for MemStorage {
     type Read<'a> = Reader<'a> where Self: 'a;
 
