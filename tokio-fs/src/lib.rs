@@ -1,3 +1,7 @@
+//! Tokio async filesystem implementation of `dmds` [`IoHandle`].
+
+#![warn(missing_docs)]
+
 use std::{
     path::{Path, PathBuf},
     pin::Pin,
@@ -5,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
 use dashmap::DashSet;
 use dmds::IoHandle;
@@ -29,7 +32,6 @@ pub struct FsHandle {
     invalid_chunks: DashSet<Box<[usize]>>,
 }
 
-#[async_trait]
 impl IoHandle for FsHandle {
     type Read<'a> = FsReader<'a> where Self: 'a;
 
@@ -210,7 +212,7 @@ pub async fn daemon<T, const DIMS: usize>(
 {
     const LEAST_WRITES: usize = 1;
 
-    let _ = ShutdownHandle::new(world.clone());
+    let _handle = ShutdownHandle::new(world.clone());
 
     loop {
         tokio::time::sleep(write_interval).await;
