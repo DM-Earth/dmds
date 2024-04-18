@@ -1,6 +1,6 @@
 [package]
 name = "dmds-tokio-fs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["JieningYu <jiening.yu@outlook.com>"]
 description = "Dmds I/O handler interacts with the filesystem using Tokio"
