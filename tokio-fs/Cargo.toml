@@ -18,5 +18,5 @@ maintenance = { status = "actively-developed" }
 dmds = "0.4"
 tokio = { version = "1.37", features = ["fs", "io-util", "time", "rt"] }
 futures = { version = "0.3", features = ["executor"] }
-dashmap = "5.5"
+dashmap = "6.1"
 bytes = "1.6"
