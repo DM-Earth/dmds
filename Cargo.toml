@@ -20,7 +20,7 @@ thiserror = "1.0"
 async-lock = "3.3"
 futures-lite = "2.3"
 bytes = "1.6"
-dashmap = "5.5"
+dashmap = "6.1"
 
 [workspace]
 resolver = "2"
